@@ -156,7 +156,9 @@ class Studio(QMainWindow):
         def success(value):
             self.jobs.discard(j);self.centralWidget().setEnabled(True);done(value)
         def failure(error):
-            self.jobs.discard(j);self.centralWidget().setEnabled(True);self.busy=False;self.stop.setEnabled(False);self.status.setText('تعذرت العملية. راجع التفاصيل ثم حاول مجدداً.')
+            self.jobs.discard(j)
+            if silent:return
+            self.centralWidget().setEnabled(True);self.busy=False;self.stop.setEnabled(False);self.status.setText('تعذرت العملية. راجع التفاصيل ثم حاول مجدداً.')
             if silent:return
             box=QMessageBox(self);box.setWindowTitle('تعذرت المعالجة');box.setText('لم تكتمل العملية؛ الصور الأصلية لم تتغير.');box.setDetailedText(error);box.exec()
         j.signals.done.connect(success);j.signals.error.connect(failure);j.signals.progress.connect(self.on_progress);self.pool.start(j)
@@ -333,6 +335,7 @@ class Studio(QMainWindow):
         repo=self.update_settings.value('repository',updater.DEFAULT_REPO)
         if not repo or self.jobs or self.busy or self.timer.isActive():return
         def done(release):
+            if automatic and (self.busy or self.jobs):return
             if release is None:
                 if not automatic:QMessageBox.information(self,'التحديثات','أنت تستخدم أحدث إصدار منشور.');return
                 return
@@ -354,7 +357,7 @@ class Studio(QMainWindow):
             subprocess.Popen([str(folder/'YaserStudioAI.exe'),'--resume-session',str(folder/'continued-session.yaser.json')],cwd=str(folder),env=env)
         except Exception as e:
             QMessageBox.warning(self,'تعذر فتح النسخة الجديدة',f'تم تجهيزها في {folder}. يمكنك فتحها يدوياً.\n{e}');return
-        QApplication.instance().quit()
+        self.update_exit=True;QApplication.instance().quit()
     def install_update(self):
         if self.jobs or self.timer.isActive() or self.busy:
             QMessageBox.information(self,'تثبيت تحديث','انتظر اكتمال المعالجة الحالية ثم اضغط تثبيت تحديث.');return
@@ -370,6 +373,7 @@ class Studio(QMainWindow):
         def work(signals):return updater.install(archive,destination,session,signals.progress.emit)
         self.run_job(work,self.launch_updated)
     def closeEvent(self,event):
+        if getattr(self,'update_exit',False) or '--smoke-test' in sys.argv:event.accept();return
         if self.jobs:
             self.cancel.set();QMessageBox.information(self,'العملية قيد التنفيذ','تم طلب الإيقاف. انتظر اكتمال الصورة الحالية ثم أغلق البرنامج.');event.ignore();return
         if self.states and QMessageBox.question(self,'إغلاق الاستوديو','إغلاق البرنامج؟ احفظ جلسة التعديلات أولاً إذا أردت الرجوع إليها.')!=QMessageBox.StandardButton.Yes:event.ignore();return
