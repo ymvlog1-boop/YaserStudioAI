@@ -27,8 +27,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python source/test_ui.py astronaut.png
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Create Yaser icon
+        run: python source/assets/create_icon.py
       - name: Build executable
         run: python source/build.py
+      - name: Build installer
+        run: |
+          winget install --id JRSoftware.InnoSetup -e --silent --accept-package-agreements --accept-source-agreements
+          & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' source/installer/setup.iss
       - name: Test executable
         run: |
           $p=Start-Process -FilePath rebuilt/YaserStudioAI/YaserStudioAI.exe -ArgumentList '--engine-test','astronaut.png','engine-test.json' -Wait -PassThru -WindowStyle Hidden
@@ -48,7 +54,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           gh release edit "v$version" --target $env:GITHUB_SHA
-          foreach ($asset in @('release/Yaser-Studio-AI-Windows.zip','release/Yaser-Studio-AI-Windows.zip.sha256')) {
+          foreach ($asset in @('release/Yaser-Studio-AI-Windows.zip','release/Yaser-Studio-AI-Windows.zip.sha256','release/Yaser-Studio-AI-Setup.exe')) {
             $ok=$false
             for ($attempt=1; $attempt -le 4; $attempt++) {
               gh release upload "v$version" $asset --clobber

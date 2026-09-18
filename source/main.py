@@ -2,7 +2,7 @@ import sys, json, copy, traceback, threading
 from pathlib import Path
 import numpy as np
 from PySide6.QtCore import Qt, Signal, QObject, QRunnable, QThreadPool, QTimer, QRectF, QTranslator, QLocale, QSettings
-from PySide6.QtGui import QImage,QPixmap,QPen,QColor,QPainter,QKeySequence,QShortcut,QFontDatabase,QFont
+from PySide6.QtGui import QImage,QPixmap,QPen,QColor,QPainter,QKeySequence,QShortcut,QFontDatabase,QFont,QIcon
 from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,
  QListWidget,QListWidgetItem,QSlider,QFileDialog,QMessageBox,QGraphicsView,QGraphicsScene,QComboBox,
  QCheckBox,QProgressBar,QScrollArea,QFrame,QSplitter,QTabWidget,QInputDialog)
@@ -88,7 +88,7 @@ QTabWidget::pane{border:0;} QTabBar::tab{background:#263348;padding:9px 14px;} Q
 '''
 class Studio(QMainWindow):
     def __init__(self):
-        super().__init__();self.setWindowTitle('Yaser Studio AI '+updater.VERSION+' — استوديو ياسر');self.resize(1440,930)
+        super().__init__();self.setWindowTitle('Yaser Studio AI '+updater.VERSION+' — استوديو ياسر');self.resize(1440,930);self.setWindowIcon(QIcon(str(engine.ROOT/'assets/yaser.ico')))
         self.states={};self.history={};self.current=None;self.original=None;self.preview=None;self.pending=[];self.output='';self.loading=False
         self.update_settings=QSettings('YaserStudioAI','Updates');
         if '--smoke-test' not in sys.argv and not os.environ.get('YASER_DISABLE_UPDATE_CHECK'):QTimer.singleShot(6000,lambda:self.check_online(True))
@@ -341,10 +341,13 @@ class Studio(QMainWindow):
                 return
             if QMessageBox.question(self,'تحديث جديد',f"الإصدار {release['version']} متاح من {repo}. تنزيله وتثبيته مع نقل الجلسة الحالية؟")!=QMessageBox.StandardButton.Yes:return
             if self.pending:QMessageBox.information(self,'تحديد غير مطبق','طبّق تحديد الإزالة أو امسحه قبل التحديث.');return
-            destination=QFileDialog.getExistingDirectory(self,'مكان حفظ النسخة الجديدة')
-            if not destination:return
+            destination=None
+            if not release.get('installer'):
+                destination=QFileDialog.getExistingDirectory(self,'مكان حفظ النسخة الجديدة')
+                if not destination:return
             session={'version':1,'states':copy.deepcopy(self.states),'output':self.output};self.centralWidget().setEnabled(False)
             def work(signals):
+                if release.get('installer'): return updater.stage_setup(release,session,signals.progress.emit)
                 import tempfile
                 with tempfile.TemporaryDirectory(prefix='Yaser-download-') as temp:
                     archive=updater.download(release,temp,signals.progress.emit)
@@ -352,6 +355,8 @@ class Studio(QMainWindow):
             self.run_job(work,self.launch_updated)
         self.run_job(lambda signals:updater.latest(repo),done,silent=automatic)
     def launch_updated(self,folder):
+        if isinstance(folder,Path) and (folder/'Yaser-Studio-AI-Setup.exe').exists():
+            updater.run_setup(folder,os.getpid());self.update_exit=True;QApplication.instance().quit();return
         try:
             env=os.environ.copy();env['PYINSTALLER_RESET_ENVIRONMENT']='1';env.pop('_MEIPASS2',None)
             subprocess.Popen([str(folder/'YaserStudioAI.exe'),'--resume-session',str(folder/'continued-session.yaser.json')],cwd=str(folder),env=env)

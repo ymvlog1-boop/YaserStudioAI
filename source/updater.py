@@ -1,7 +1,7 @@
 """User-selected offline updates, installed alongside the running version."""
 from pathlib import Path,PurePosixPath
 import json,zipfile,hashlib,tempfile,shutil,os
-VERSION='0.2.0'
+VERSION='0.3.0'
 DEFAULT_REPO='ymvlog1-boop/YaserStudioAI'
 PREFIX='YaserStudioAI/Windows/YaserStudioAI/'
 REQUIRED={'YaserStudioAI.exe','_internal/models/u2net_human_seg.onnx','_internal/models/face_detection_yunet_2023mar.onnx'}
@@ -63,11 +63,12 @@ def latest(repo):
         if e.code==404:raise ValueError('لا يوجد إصدار منشور متاح؛ تأكد من أن المستودع عام وفيه Release.') from e
         raise
     if data.get('draft') or data.get('prerelease') or version(data['tag_name'])<=version(VERSION):return None
-    asset=next((a for a in data.get('assets',[]) if a['name']=='Yaser-Studio-AI-Windows.zip'),None)
+    asset=next((a for a in data.get('assets',[]) if a['name']=='Yaser-Studio-AI-Setup.exe'),None)
+    if asset is None: asset=next((a for a in data.get('assets',[]) if a['name']=='Yaser-Studio-AI-Windows.zip'),None)
     if asset is None:raise ValueError('الإصدار المنشور لا يحتوي حزمة Windows المطلوبة')
     url=asset['browser_download_url'];digest=asset.get('digest','')
     if not url.startswith('https://github.com/'+repo+'/releases/download/') or not re.fullmatch(r'sha256:[a-fA-F0-9]{64}',digest or ''):raise ValueError('رابط التحديث أو بصمة التحقق غير متاح')
-    return {'version':data['tag_name'],'url':url,'sha256':digest[7:].lower(),'size':asset['size']}
+    return {'version':data['tag_name'],'url':url,'sha256':digest[7:].lower(),'size':asset['size'],'installer':asset['name'].endswith('.exe')}
 
 def download(release,folder,progress=lambda n,s:None):
     if not 0<release['size']<2*1024**3:raise ValueError('حجم التحديث غير صالح')
@@ -81,3 +82,23 @@ def download(release,folder,progress=lambda n,s:None):
             out.write(chunk);digest.update(chunk);progress(round(total/release['size']*100),'جارٍ تنزيل التحديث…')
     if total!=release['size'] or digest.hexdigest()!=release['sha256']:raise ValueError('التحديث لم يجتز فحص سلامة التنزيل')
     return path
+
+import uuid,base64,subprocess
+def installed_directory():
+    if getattr(sys,'frozen',False) and (Path(sys.executable).parent/'installed.json').is_file(): return Path(sys.executable).parent
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,r'Software\\YaserStudioAI') as key: return Path(winreg.QueryValueEx(key,'InstallDir')[0])
+    except OSError: pass
+    return Path(os.environ.get('LOCALAPPDATA',Path.home()/'AppData/Local'))/'Programs/YaserStudioAI'
+def stage_setup(release,session,progress=lambda n,s:None):
+    root=Path(os.environ.get('LOCALAPPDATA',Path.home()/'AppData/Local'))/'YaserStudioAI'/'updates'/str(uuid.uuid4());root.mkdir(parents=True)
+    try:
+        setup=download(release,root,progress);setup.rename(root/'Yaser-Studio-AI-Setup.exe')
+        saved=root/'continued-session.yaser.json';saved.write_text(json.dumps(session,ensure_ascii=False),encoding='utf-8')
+        return root
+    except BaseException: shutil.rmtree(root,ignore_errors=True);raise
+def run_setup(folder,parent_pid):
+    script=(Path(getattr(sys,'_MEIPASS',Path(__file__).parent))/'assets'/'install-update.ps1').read_text(encoding='utf-8-sig')
+    env=os.environ.copy();env.update({'YASER_SETUP':str(folder/'Yaser-Studio-AI-Setup.exe'),'YASER_SESSION':str(folder/'continued-session.yaser.json'),'YASER_PARENT':str(parent_pid)})
+    return subprocess.Popen(['powershell.exe','-NoProfile','-NonInteractive','-WindowStyle','Hidden','-EncodedCommand',base64.b64encode(script.encode('utf-16le')).decode('ascii')],env=env)
