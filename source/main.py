@@ -42,7 +42,9 @@ class Canvas(QGraphicsView):
         if not r.contains(p):return None
         return [p.x()/r.width(),p.y()/r.height()]
     def paint_segment(self,a,b):
-        r=self.sceneRect();color=QColor(246,127,115,165) if self.mode=='remove' else QColor(65,207,174,140)
+        r=self.sceneRect();color=QColor(246,127,115,165) if self.mode in ('remove','bg_erase','local_darken') else QColor(65,207,174,140)
+        if self.mode in ('local_brighten','local_saturate'):color=QColor(255,201,91,165)
+        if self.mode=='bg_add':color=QColor(72,170,255,165)
         if self.mode=='erase':color=QColor(255,200,80,180)
         pen=QPen(color,max(1,self.brush/1000*min(r.width(),r.height())));pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         self.scene().addLine(a[0]*r.width(),a[1]*r.height(),b[0]*r.width()+.01,b[1]*r.height()+.01,pen)
@@ -113,29 +115,46 @@ class Studio(QMainWindow):
         mid=QWidget();ml=QVBoxLayout(mid);self.canvas=Canvas();self.canvas.stroke.connect(self.on_stroke);ml.addWidget(self.canvas,1)
         self.image_info=QLabel('ابدأ باستيراد صورة أو مجلد صور');self.image_info.setAlignment(Qt.AlignmentFlag.AlignCenter);ml.addWidget(self.image_info)
         tip=QLabel('عجلة الماوس للتكبير • السحب للتحريك في أداة العرض • المعاينة مخفّضة والحفظ بالدقة الأصلية');tip.setObjectName('muted');tip.setWordWrap(True);ml.addWidget(tip);split.addWidget(mid)
-        panel=QWidget();panel.setMinimumWidth(300);panel.setMaximumWidth(380);outer=QVBoxLayout(panel);tabs=QTabWidget();outer.addWidget(tabs);skin_tab=QWidget();tabs.addTab(skin_tab,'البشرة');pl=QVBoxLayout(skin_tab)
-        self.section(pl,'تنقية البشرة')
+        panel=QWidget();panel.setMinimumWidth(360);panel.setMaximumWidth(470);outer=QVBoxLayout(panel);tabs=QTabWidget();tabs.setTabPosition(QTabWidget.TabPosition.North);outer.addWidget(tabs)
+        quality_tab=QWidget();tabs.addTab(quality_tab,'١ الجودة');pl=QVBoxLayout(quality_tab);self.section(pl,'تحسين جودة الصورة')
+        self.enhance_sliders={}
+        for key,name in [('denoise','إزالة التشويش'),('sharpen','استرجاع الحدة')]:self.enhance_sliders[key]=self.control_slider(pl,name,0,100)
+        row=QHBoxLayout();row.addWidget(QLabel('رفع الدقة عند الحفظ'));self.upscale=QComboBox();self.upscale.addItems(['الحجم الأصلي','تكبير ×2','تكبير ×4']);self.upscale.currentIndexChanged.connect(self.settings_changed);row.addWidget(self.upscale);pl.addLayout(row)
+        note=QLabel('الحفظ ×2 أو ×4 يستخدم تكبير محلي محافظ ويحافظ على بنية الصورة.');note.setObjectName('muted');note.setWordWrap(True);pl.addWidget(note);pl.addStretch()
+
+        color_tab=QWidget();tabs.addTab(color_tab,'٢ الضوء');pl=QVBoxLayout(color_tab);self.section(pl,'الإضاءة والألوان')
+        self.tone_sliders={}
+        tone_names=[('exposure','التعريض'),('contrast','التباين'),('highlights','الإضاءة القوية'),('shadows','الظلال'),('whites','الأبيض'),('blacks','الأسود'),('temperature','حرارة اللون'),('tint','صبغة اللون'),('vibrance','حيوية الألوان'),('saturation','التشبّع'),('clarity','الوضوح'),('dehaze','إزالة الضباب')]
+        for key,name in tone_names:self.tone_sliders[key]=self.control_slider(pl,name,-100,100)
+        self.section(pl,'تعديل موضعي بالفرشاة');self.local_kind=QComboBox();self.local_kind.addItems(['تفتيح','تغميق','تقوية اللون','تنعيم موضعي']);pl.addWidget(self.local_kind);self.local_amount=self.control_slider(pl,'قوة الفرشاة',1,100,35)
+
+        skin_tab=QWidget();tabs.addTab(skin_tab,'٣ البورتريه');pl=QVBoxLayout(skin_tab);self.section(pl,'قوالب تنقية سريعة')
+        self.preset=QComboBox();self.preset.addItems(['يدوي','طبيعي خفيف','استوديو متوازن','زفاف ناعم','تنظيف قوي','الحفاظ على النمش']);self.preset.currentIndexChanged.connect(self.preset_changed);pl.addWidget(self.preset)
         self.sliders=[]
-        for name in ['الحبوب','التجاعيد','النمش / الشوائب','تنعيم البشرة']:
-            row=QHBoxLayout();row.addWidget(QLabel(name));number=QLabel('0');row.addStretch();row.addWidget(number);pl.addLayout(row)
-            s=QSlider(Qt.Orientation.Horizontal);s.setRange(0,100);s.setLayoutDirection(Qt.LayoutDirection.LeftToRight);s.valueChanged.connect(number.setNum);s.sliderPressed.connect(self.checkpoint);s.actionTriggered.connect(self.checkpoint);s.valueChanged.connect(self.settings_changed);pl.addWidget(s);self.sliders.append(s)
-        self.add_button(pl,'تطبيق مستويات التنقية على كل الصور',self.apply_all)
-        pl.addStretch();region_tab=QWidget();tabs.addTab(region_tab,'التحديد');pl=QVBoxLayout(region_tab)
-        self.section(pl,'الوجوه والمناطق')
+        for name in ['الحبوب','التجاعيد','النمش / الشوائب','تنعيم البشرة']:self.sliders.append(self.control_slider(pl,name,0,100))
+        self.portrait_sliders={}
+        for key,name in [('skin_light','تفتيح البشرة'),('skin_tone','دفء لون البشرة'),('shine','إزالة اللمعان'),('under_eyes','الهالات تحت العين'),('eyes','تفتيح العيون'),('teeth','تبييض الأسنان')]:self.portrait_sliders[key]=self.control_slider(pl,name,0,100)
+        self.add_button(pl,'تطبيق كل الإعدادات على الدفعة',self.apply_all,True)
+
+        region_tab=QWidget();tabs.addTab(region_tab,'٤ الرتوش');pl=QVBoxLayout(region_tab);self.section(pl,'الوجوه والمناطق')
         self.face_list=QListWidget();self.face_list.setMaximumHeight(112);self.face_list.itemChanged.connect(self.face_changed);pl.addWidget(self.face_list)
         self.show_boxes=QCheckBox('إظهار إطارات الوجوه');self.show_boxes.setChecked(True);self.show_boxes.toggled.connect(self.show_preview);pl.addWidget(self.show_boxes)
         self.show_skin=QCheckBox('إظهار منطقة تنقية البشرة');self.show_skin.toggled.connect(self.show_preview);pl.addWidget(self.show_skin)
-        self.mode=QComboBox();self.mode.addItems(['عرض وتحريك','فرشاة إضافة بشرة','فرشاة استثناء بشرة','فرشاة إزالة عنصر']);self.mode.currentIndexChanged.connect(self.mode_changed);pl.addWidget(self.mode)
+        self.mode=QComboBox();self.mode.addItems(['عرض وتحريك','إضافة منطقة بشرة','استثناء منطقة بشرة','إزالة عيب أو عنصر','تفتيح بالفرشاة','تغميق بالفرشاة','تقوية لون بالفرشاة','تنعيم بالفرشاة','استرجاع من الخلفية','حذف من الخلفية']);self.mode.currentIndexChanged.connect(self.mode_changed);pl.addWidget(self.mode)
         pl.addWidget(QLabel('حجم الفرشاة'));bs=QSlider(Qt.Orientation.Horizontal);bs.setRange(3,180);bs.setValue(25);bs.valueChanged.connect(lambda v:setattr(self.canvas,'brush',v));pl.addWidget(bs)
         self.add_button(pl,'إزالة العنصر المحدد',self.commit_removal)
         self.add_button(pl,'مسح تحديد الإزالة',self.clear_pending)
-        pl.addStretch();bg_tab=QWidget();tabs.addTab(bg_tab,'الخلفية');pl=QVBoxLayout(bg_tab)
-        self.section(pl,'تغيير الخلفية')
+        pl.addStretch();bg_tab=QWidget();tabs.addTab(bg_tab,'٥ الخلفية');pl=QVBoxLayout(bg_tab);self.section(pl,'قص احترافي وتغيير الخلفية')
         self.add_button(pl,'اختيار خلفية من الكمبيوتر',self.choose_background)
         self.bg_label=QLabel('الخلفية الأصلية');self.bg_label.setWordWrap(True);self.bg_label.setObjectName('muted');pl.addWidget(self.bg_label)
         self.add_button(pl,'تطبيق الخلفية على الدفعة',self.background_all)
         self.add_button(pl,'استعادة الخلفية الأصلية',self.clear_background)
-        note=QLabel('فصل أشخاص تلقائي مع تنعيم الحواف. الشعر الدقيق والخلفيات المعقدة قد تحتاج مراجعة.');note.setWordWrap(True);note.setObjectName('muted');pl.addWidget(note)
+        self.background_sliders={}
+        self.background_sliders['edge']=self.control_slider(pl,'إزاحة الحافة',-10,10,-2)
+        self.background_sliders['feather']=self.control_slider(pl,'نعومة الحافة',0,20,2)
+        self.background_sliders['decontaminate']=self.control_slider(pl,'تنظيف لون الخلفية القديمة',0,100,65)
+        self.background_sliders['blur']=self.control_slider(pl,'ضبابية الخلفية الجديدة',0,100,0)
+        note=QLabel('استخدم «استرجاع من الخلفية» للشعر أو الأطراف الناقصة، و«حذف من الخلفية» لبقايا الخلفية القديمة.');note.setWordWrap(True);note.setObjectName('muted');pl.addWidget(note)
         pl.addStretch();scroll=QScrollArea();scroll.setWidgetResizable(True);scroll.setWidget(panel);split.addWidget(scroll);split.setSizes([220,780,330])
         foot=QHBoxLayout();root.addLayout(foot);self.add_button(foot,'اختيار مجلد الإخراج',self.choose_output)
         self.output_label=QLabel('لم يُحدد مجلد الحفظ');self.output_label.setObjectName('muted');foot.addWidget(self.output_label,1)
@@ -151,6 +170,10 @@ class Studio(QMainWindow):
         layout.addWidget(b);return b
     def section(self,layout,title):
         l=QLabel(title);l.setObjectName('section');layout.addWidget(l)
+    def control_slider(self,layout,title,minimum,maximum,value=0):
+        row=QHBoxLayout();row.addWidget(QLabel(title));number=QLabel(str(value));row.addStretch();row.addWidget(number);layout.addLayout(row)
+        slider=QSlider(Qt.Orientation.Horizontal);slider.setRange(minimum,maximum);slider.setValue(value);slider.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        slider.valueChanged.connect(number.setNum);slider.sliderPressed.connect(self.checkpoint);slider.valueChanged.connect(self.settings_changed);layout.addWidget(slider);return slider
     def run_job(self,fn,done,silent=False):
         j=Job(fn);self.jobs.add(j)
         def success(value):
@@ -185,8 +208,14 @@ class Studio(QMainWindow):
         self.current=item.data(Qt.ItemDataRole.UserRole);self.pending=[];self.original=None;self.preview=None;self.canvas.scene().clear();self.canvas.pix=None;self.canvas.zoomed=False;self.sync_controls();self.request_preview()
     def sync_controls(self):
         if not self.current:return
-        self.loading=True;s=self.states[self.current]
+        self.loading=True;s=engine.normalize_state(self.states[self.current]);self.states[self.current]=s
         for slider,value in zip(self.sliders,s['settings']):slider.setValue(value)
+        for key,slider in self.enhance_sliders.items():slider.setValue(s['enhance'][key])
+        self.upscale.setCurrentIndex({1:0,2:1,4:2}.get(s['enhance'].get('upscale',1),0))
+        for key,slider in self.tone_sliders.items():slider.setValue(s['tone'][key])
+        for key,slider in self.portrait_sliders.items():slider.setValue(s['portrait'][key])
+        for key,slider in self.background_sliders.items():slider.setValue(s['background_options'][key])
+        self.preset.setCurrentText(s.get('preset','يدوي'))
         self.face_list.clear()
         for i,f in enumerate(s['faces'] or []):
             item=QListWidgetItem(f'الوجه {i+1}');item.setFlags(item.flags()|Qt.ItemFlag.ItemIsUserCheckable);item.setCheckState(Qt.CheckState.Checked if f['enabled'] else Qt.CheckState.Unchecked);self.face_list.addItem(item)
@@ -197,7 +226,23 @@ class Studio(QMainWindow):
             hist=self.history[self.current];hist.append(copy.deepcopy(self.states[self.current]));del hist[:-30]
     def settings_changed(self,*args):
         if self.loading or not self.current:return
-        self.states[self.current]['settings']=[s.value() for s in self.sliders];self.schedule()
+        state=self.states[self.current];state['settings']=[s.value() for s in self.sliders]
+        state['enhance']={key:slider.value() for key,slider in self.enhance_sliders.items()};state['enhance']['upscale']=[1,2,4][self.upscale.currentIndex()]
+        state['tone']={key:slider.value() for key,slider in self.tone_sliders.items()};state['portrait']={key:slider.value() for key,slider in self.portrait_sliders.items()};state['background_options']={key:slider.value() for key,slider in self.background_sliders.items()};self.schedule()
+    def preset_changed(self,*args):
+        if self.loading or not self.current:return
+        presets={
+          'طبيعي خفيف':([25,15,15,22],{'skin_light':8,'skin_tone':4,'shine':20,'under_eyes':15,'eyes':10,'teeth':8}),
+          'استوديو متوازن':([45,32,28,42],{'skin_light':12,'skin_tone':6,'shine':40,'under_eyes':30,'eyes':22,'teeth':18}),
+          'زفاف ناعم':([52,38,35,55],{'skin_light':18,'skin_tone':8,'shine':48,'under_eyes':35,'eyes':28,'teeth':30}),
+          'تنظيف قوي':([78,62,60,68],{'skin_light':15,'skin_tone':5,'shine':65,'under_eyes':52,'eyes':25,'teeth':25}),
+          'الحفاظ على النمش':([38,22,0,32],{'skin_light':8,'skin_tone':5,'shine':30,'under_eyes':22,'eyes':15,'teeth':12})}
+        name=self.preset.currentText();self.states[self.current]['preset']=name
+        if name in presets:
+            self.checkpoint();values,portrait=presets[name];self.loading=True
+            for slider,value in zip(self.sliders,values):slider.setValue(value)
+            for key,value in portrait.items():self.portrait_sliders[key].setValue(value)
+            self.loading=False;self.settings_changed()
     def schedule(self):
         self.revision+=1;self.timer.start()
     def face_changed(self,item):
@@ -205,10 +250,14 @@ class Studio(QMainWindow):
         row=self.face_list.row(item);faces=self.states[self.current]['faces'] or []
         if row>=len(faces):return
         self.checkpoint();faces[row]['enabled']=item.checkState()==Qt.CheckState.Checked;self.schedule()
-    def mode_changed(self,i):self.canvas.set_mode(['view','skin','erase','remove'][i])
+    def mode_changed(self,i):self.canvas.set_mode(['view','skin','erase','remove','local_brighten','local_darken','local_saturate','local_smooth','bg_add','bg_erase'][i])
     def on_stroke(self,s):
         if not self.current:return
         if self.canvas.mode=='remove':self.pending.append(s);self.status.setText('تحديد إزالة جاهز — اضغط «إزالة العنصر المحدد»')
+        elif self.canvas.mode.startswith('local_'):
+            self.checkpoint();s['kind']=self.canvas.mode.removeprefix('local_');s['amount']=self.local_amount.value();self.states[self.current]['local_strokes'].append(s);self.schedule()
+        elif self.canvas.mode.startswith('bg_'):
+            self.checkpoint();s['erase']=self.canvas.mode=='bg_erase';self.states[self.current]['background_strokes'].append(s);self.schedule()
         else:self.checkpoint();self.states[self.current]['strokes'].append(s);self.schedule()
     def commit_removal(self):
         if not self.current or not self.pending:return
@@ -220,24 +269,25 @@ class Studio(QMainWindow):
         if self.history[self.current]:self.states[self.current]=self.history[self.current].pop();self.sync_controls();self.schedule()
     def apply_all(self):
         if not self.current:return
-        settings=list(self.states[self.current]['settings'])
+        source=self.states[self.current]
         for p,s in self.states.items():
-            self.history[p].append(copy.deepcopy(s));self.history[p]=self.history[p][-30:];s['settings']=list(settings)
-        self.status.setText(f'تم تطبيق مستويات التنقية على {len(self.states)} صورة؛ تحديدات الفرشاة واستثناءات الوجوه تخص كل صورة.');self.schedule()
+            self.history[p].append(copy.deepcopy(s));self.history[p]=self.history[p][-30:]
+            for key in ('settings','enhance','tone','portrait','background_options','preset'):s[key]=copy.deepcopy(source[key])
+        self.status.setText(f'تم تطبيق الجودة والإضاءة والألوان والتنقية على {len(self.states)} صورة؛ الفرشاة واختيار الوجوه يبقيان خاصين بكل صورة.');self.schedule()
     def choose_background(self):
         if not self.current:return
         p,_=QFileDialog.getOpenFileName(self,'اختيار الخلفية','','صور (*.jpg *.jpeg *.png *.webp *.bmp)')
         if p:self.checkpoint();self.states[self.current]['background']=p;self.sync_controls();self.schedule()
     def clear_background(self):
-        if self.current:self.checkpoint();self.states[self.current]['background']=None;self.sync_controls();self.schedule()
+        if self.current:self.checkpoint();self.states[self.current]['background']=None;self.states[self.current]['background_strokes']=[];self.sync_controls();self.schedule()
     def background_all(self):
         if not self.current:return
-        bg=self.states[self.current]['background']
-        for p,s in self.states.items():self.history[p].append(copy.deepcopy(s));self.history[p]=self.history[p][-30:];s['background']=bg
+        source=self.states[self.current];bg=source['background']
+        for p,s in self.states.items():self.history[p].append(copy.deepcopy(s));self.history[p]=self.history[p][-30:];s['background']=bg;s['background_options']=copy.deepcopy(source['background_options'])
         self.status.setText('تم تطبيق اختيار الخلفية على الدفعة');self.schedule()
     def request_preview(self):
         if not self.current or self.busy:return
-        self.revision+=1;revision=self.revision;path=self.current;state=copy.deepcopy(self.states[path]);self.status.setText('جارٍ تجهيز المعاينة وكشف الوجوه…')
+        self.revision+=1;revision=self.revision;path=self.current;state=engine.normalize_state(copy.deepcopy(self.states[path]));self.status.setText('جارٍ تجهيز المعاينة وكشف الوجوه…')
         def work(signals):
             if revision!=self.revision:return None
             rgb,_=engine.read_image(path,1400)
@@ -288,7 +338,7 @@ class Studio(QMainWindow):
                 try:
                     rgb,meta=engine.read_image(p);s=states[p]
                     if s['faces'] is None:s['faces']=engine.detect_faces(rgb)
-                    out=engine.process(rgb,s)
+                    out=engine.process(rgb,s,final=True)
                     if self.cancel.is_set():break
                     saved.append(engine.save_new(out,p,folder,meta,fmt))
                     del rgb,out
@@ -305,7 +355,7 @@ class Studio(QMainWindow):
         if not self.states:return
         p,_=QFileDialog.getSaveFileName(self,'حفظ جلسة التعديلات','','جلسة ياسر (*.yaser.json)')
         if p:
-            try:Path(p).write_text(json.dumps({'version':1,'states':self.states,'output':self.output},ensure_ascii=False),encoding='utf-8');self.status.setText('حُفظت الجلسة؛ أبقِ ملفات الصور والخلفيات في مواقعها')
+            try:Path(p).write_text(json.dumps({'version':2,'states':self.states,'output':self.output},ensure_ascii=False),encoding='utf-8');self.status.setText('حُفظت الجلسة؛ أبقِ ملفات الصور والخلفيات في مواقعها')
             except Exception as e:QMessageBox.warning(self,'تعذر حفظ الجلسة',str(e))
     def load_session(self,preset=None):
         if self.busy:return
@@ -313,10 +363,11 @@ class Studio(QMainWindow):
         if not p:return
         try:
             data=json.loads(Path(p).read_text(encoding='utf-8'));states=data['states']
-            if data.get('version')!=1 or not isinstance(states,dict):raise ValueError('صيغة جلسة غير مدعومة')
+            if data.get('version') not in (1,2) or not isinstance(states,dict):raise ValueError('صيغة جلسة غير مدعومة')
             for path,state in states.items():
                 if len(state['settings'])!=4 or any(not isinstance(v,int) or not 0<=v<=100 for v in state['settings']):raise ValueError('مستويات غير صالحة')
                 for key in ('strokes','removals'):assert isinstance(state[key],list)
+                states[path]=engine.normalize_state(state)
             if self.states and QMessageBox.question(self,'فتح جلسة','استبدال الجلسة الحالية؟ تأكد من حفظها أولاً.')!=QMessageBox.StandardButton.Yes:return
             self.revision+=1;self.current=None;self.files.clear();self.states={};self.history={}
             existing={k:v for k,v in states.items() if Path(k).is_file()};self.add_paths(existing)
@@ -345,9 +396,9 @@ class Studio(QMainWindow):
             if not release.get('installer'):
                 destination=QFileDialog.getExistingDirectory(self,'مكان حفظ النسخة الجديدة')
                 if not destination:return
-            session={'version':1,'states':copy.deepcopy(self.states),'output':self.output};self.centralWidget().setEnabled(False)
+            session={'version':2,'states':copy.deepcopy(self.states),'output':self.output};self.centralWidget().setEnabled(False)
             def work(signals):
-                if release.get('installer'): return updater.stage_setup(release,session,signals.progress.emit)
+                if release.get('installer'):return updater.stage_installer(release,session,signals.progress.emit)
                 import tempfile
                 with tempfile.TemporaryDirectory(prefix='Yaser-download-') as temp:
                     archive=updater.download(release,temp,signals.progress.emit)
@@ -355,8 +406,10 @@ class Studio(QMainWindow):
             self.run_job(work,self.launch_updated)
         self.run_job(lambda signals:updater.latest(repo),done,silent=automatic)
     def launch_updated(self,folder):
-        if isinstance(folder,Path) and (folder/'Yaser-Studio-AI-Setup.exe').exists():
-            updater.run_setup(folder,os.getpid());self.update_exit=True;QApplication.instance().quit();return
+        if isinstance(folder,dict):
+            try:updater.start_installer(folder)
+            except Exception as e:QMessageBox.warning(self,'تعذر بدء التحديث',str(e));return
+            self.update_exit=True;QApplication.instance().quit();return
         try:
             env=os.environ.copy();env['PYINSTALLER_RESET_ENVIRONMENT']='1';env.pop('_MEIPASS2',None)
             subprocess.Popen([str(folder/'YaserStudioAI.exe'),'--resume-session',str(folder/'continued-session.yaser.json')],cwd=str(folder),env=env)
@@ -368,12 +421,15 @@ class Studio(QMainWindow):
             QMessageBox.information(self,'تثبيت تحديث','انتظر اكتمال المعالجة الحالية ثم اضغط تثبيت تحديث.');return
         if self.pending:
             QMessageBox.information(self,'تحديد غير مطبق','طبّق تحديد الإزالة أو امسحه قبل التحديث.');return
-        archive,_=QFileDialog.getOpenFileName(self,'اختر حزمة تحديث ياسر','','حزمة تحديث (*.zip)')
+        archive,_=QFileDialog.getOpenFileName(self,'اختر حزمة تحديث ياسر','','تحديث ياسر (*.exe *.zip)')
         if not archive:return
-        if QMessageBox.question(self,'تثبيت تحديث','سيُجهّز البرنامج نسخة جديدة وينقل الجلسة الحالية إليها ثم يفتحها. النسخة القديمة تبقى متاحة. اختر فقط حزمة حصلت عليها من مصدر تثق به؛ فحص سلامة الملفات لا يثبت هوية ناشرها. هل تريد المتابعة؟')!=QMessageBox.StandardButton.Yes:return
+        if QMessageBox.question(self,'تثبيت تحديث','سيحفظ البرنامج جلستك ثم يثبت التحديث ويعيد فتحها. المثبّت يحدّث نفس مكان التثبيت والاختصار. اختر فقط حزمة حصلت عليها من مصدر تثق به؛ فحص سلامة الملفات لا يثبت هوية ناشرها. هل تريد المتابعة؟')!=QMessageBox.StandardButton.Yes:return
+        if Path(archive).suffix.lower()=='.exe':
+            session={'version':2,'states':copy.deepcopy(self.states),'output':self.output};self.centralWidget().setEnabled(False)
+            self.run_job(lambda signals:updater.stage_installer(None,session,signals.progress.emit,local_file=archive),self.launch_updated);return
         destination=QFileDialog.getExistingDirectory(self,'اختر مكان حفظ النسخة الجديدة')
         if not destination:return
-        session={'version':1,'states':copy.deepcopy(self.states),'output':self.output}
+        session={'version':2,'states':copy.deepcopy(self.states),'output':self.output}
         self.centralWidget().setEnabled(False)
         def work(signals):return updater.install(archive,destination,session,signals.progress.emit)
         self.run_job(work,self.launch_updated)
