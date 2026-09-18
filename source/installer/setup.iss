@@ -10,7 +10,7 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-OutputDir=..\release
+OutputDir=..\..\release
 OutputBaseFilename=Yaser-Studio-AI-Setup
 SetupIconFile=..\assets\yaser.ico
 UninstallDisplayIcon={app}\YaserStudioAI.exe
@@ -19,7 +19,7 @@ SolidCompression=yes
 WizardStyle=modern
 CloseApplications=yes
 [Files]
-Source: "..\rebuilt\YaserStudioAI\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\..\rebuilt\YaserStudioAI\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "installed.json"; DestDir: "{app}"; Flags: ignoreversion
 [Icons]
 Name: "{autodesktop}\Yaser Studio AI"; Filename: "{app}\YaserStudioAI.exe"; WorkingDir: "{app}"
