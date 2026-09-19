@@ -5,7 +5,7 @@ os.environ['YASER_DISABLE_UPDATE_CHECK']='1'
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 SAMPLE=Path(sys.argv[1]).resolve() if len(sys.argv)>1 else Path('astronaut.png').resolve()
 from PySide6.QtWidgets import QApplication,QMessageBox,QFileDialog
-from PySide6.QtCore import Qt,QPoint
+from PySide6.QtCore import Qt,QPoint,QMimeData,QUrl
 from PySide6.QtGui import QFontDatabase,QFont
 from PySide6.QtTest import QTest
 from PIL import Image
@@ -25,6 +25,17 @@ with tempfile.TemporaryDirectory() as d:
     p=Path(d);sample=Image.open(SAMPLE);sample.save(p/'صورة أولى.jpg');sample.save(p/'صورة ثانية.jpg')
     w.add_paths([str(p/'صورة أولى.jpg'),str(p/'صورة ثانية.jpg')]);wait()
     assert w.preview is not None and len(w.states[w.current]['faces'])>=1
+    deadline=time.time()+10
+    while w.thumbnail_busy and time.time()<deadline:app.processEvents();time.sleep(.01)
+    assert not w.files.item(0).icon().isNull()
+    sample.save(p/'صورة مسحوبة.png');mime=QMimeData();mime.setUrls([QUrl.fromLocalFile(str(p/'صورة مسحوبة.png'))])
+    class Drop:
+        def mimeData(self):return mime
+        def acceptProposedAction(self):self.accepted=True
+        def ignore(self):self.accepted=False
+    event=Drop();w.dropEvent(event);assert event.accepted and len(w.states)==3
+    w.compare.setChecked(True);w.show_preview();assert w.canvas.pix.pixmap().width()==w.preview.shape[1]*2+8
+    w.compare.setChecked(False)
     w.checkpoint();w.sliders[0].setValue(60);wait();assert w.states[w.current]['settings'][0]==60
     w.undo();wait();assert w.sliders[0].value()==0
     w.sliders[3].setValue(40);w.apply_all();wait();assert all(s['settings'][3]==40 for s in w.states.values())
@@ -33,12 +44,12 @@ with tempfile.TemporaryDirectory() as d:
     QTest.mousePress(w.canvas.viewport(),Qt.MouseButton.LeftButton,pos=center);QTest.mouseMove(w.canvas.viewport(),center+QPoint(15,15));QTest.mouseRelease(w.canvas.viewport(),Qt.MouseButton.LeftButton,pos=center+QPoint(15,15));wait()
     assert len(w.states[w.current]['strokes'])==1
     w.mode.setCurrentIndex(3);w.on_stroke({'points':[[.1,.1]],'size':.04,'erase':False});w.commit_removal();wait();assert len(w.states[w.current]['removals'])==1;w.undo();wait();assert not w.states[w.current]['removals']
-    w.output=str(p/'نتائج');w.export(True);wait();assert len(list((p/'نتائج').glob('*.jpg')))==2
+    w.output=str(p/'نتائج');w.export(True);wait();assert len(list((p/'نتائج').glob('*.jpg')))==3
     assert all(Image.open(f).size==(512,512) for f in (p/'نتائج').glob('*.jpg'))
     QFileDialog.getSaveFileName=lambda *a,**k:(str(p/'session.yaser.json'),'')
     w.save_session();assert (p/'session.yaser.json').exists()
     QFileDialog.getOpenFileName=lambda *a,**k:(str(p/'session.yaser.json'),'')
-    w.load_session();wait();assert len(w.states)==2
+    w.load_session();wait();assert len(w.states)==3
     w.mode.setCurrentIndex(0);w.grab().save(str(Path(__file__).resolve().parents[1]/'interface.png'))
     w.states.clear();w.close()
-print('PASS: UI import, detection, sliders, batch settings, face exclusion, real brush mouse events, inpaint undo, full-resolution batch export, session round trip, RTL screenshot')
+print('PASS: native-ready import, thumbnails, drag/drop, before/after, detection, sliders, batch, face exclusion, brush, inpaint undo, export, session, RTL screenshot')

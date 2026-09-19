@@ -1,13 +1,15 @@
 import sys, json, copy, traceback, threading
 from pathlib import Path
 import numpy as np
-from PySide6.QtCore import Qt, Signal, QObject, QRunnable, QThreadPool, QTimer, QRectF, QTranslator, QLocale, QSettings
-from PySide6.QtGui import QImage,QPixmap,QPen,QColor,QPainter,QKeySequence,QShortcut,QFontDatabase,QFont,QIcon
+from PySide6.QtCore import Qt, Signal, QObject, QRunnable, QThreadPool, QTimer, QRectF, QTranslator, QLocale, QSettings, QSize
+from PySide6.QtGui import QImage,QPixmap,QPen,QColor,QPainter,QKeySequence,QShortcut,QFontDatabase,QFont,QIcon,QImageReader
 from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,
  QListWidget,QListWidgetItem,QSlider,QFileDialog,QMessageBox,QGraphicsView,QGraphicsScene,QComboBox,
- QCheckBox,QProgressBar,QScrollArea,QFrame,QSplitter,QTabWidget,QInputDialog)
+ QCheckBox,QProgressBar,QScrollArea,QFrame,QSplitter,QTabWidget,QInputDialog,QListView,QAbstractItemView)
 import engine
 import updater, subprocess, os
+
+SUPPORTED_IMAGES={'.jpg','.jpeg','.png','.webp','.bmp','.tif','.tiff'}
 
 class Signals(QObject):
     done=Signal(object);error=Signal(str);progress=Signal(int,str)
@@ -87,11 +89,14 @@ QSlider::handle:horizontal{background:#e9fff9;border-radius:7px;width:14px;margi
 QComboBox{background:#263348;padding:7px;border:1px solid #35445b;border-radius:6px;}
 QProgressBar{border:0;background:#263348;border-radius:5px;text-align:center;} QProgressBar::chunk{background:#38b998;border-radius:5px;}
 QTabWidget::pane{border:0;} QTabBar::tab{background:#263348;padding:9px 14px;} QTabBar::tab:selected{background:#246255;color:#ffffff;} QScrollArea{border:0;} QToolTip{background:#263348;color:white;padding:6px;}
+QMessageBox QLabel{min-width:520px;} QMessageBox QPushButton{min-width:110px;}
 '''
 class Studio(QMainWindow):
     def __init__(self):
         super().__init__();self.setWindowTitle('Yaser Studio AI '+updater.VERSION+' — استوديو ياسر');self.resize(1440,930);self.setWindowIcon(QIcon(str(engine.ROOT/'assets/yaser.ico')))
+        self.setAcceptDrops(True)
         self.states={};self.history={};self.current=None;self.original=None;self.preview=None;self.pending=[];self.output='';self.loading=False
+        self.items_by_path={};self.thumbnail_queue=[];self.thumbnail_busy=False
         self.update_settings=QSettings('YaserStudioAI','Updates');
         if '--smoke-test' not in sys.argv and not os.environ.get('YASER_DISABLE_UPDATE_CHECK'):QTimer.singleShot(6000,lambda:self.check_online(True))
         self.pool=QThreadPool();self.pool.setMaxThreadCount(1);self.jobs=set();self.revision=0;self.busy=False;self.cancel=threading.Event()
@@ -100,19 +105,23 @@ class Studio(QMainWindow):
         header=QHBoxLayout();brand=QLabel('Yaser Studio AI');brand.setObjectName('brand');header.addWidget(brand)
         sub=QLabel('استوديو الصور  /  معالجة محلية على جهازك');sub.setObjectName('muted');header.addWidget(sub);header.addStretch();self.add_button(header,'تحديث من ملف',self.install_update);self.add_button(header,'تحديثات الإنترنت',self.configure_updates);root.addLayout(header)
         toolbar=QHBoxLayout();root.addLayout(toolbar)
-        self.add_button(toolbar,'استيراد صور JPG',self.import_files,True)
+        self.add_button(toolbar,'استيراد صور',self.import_files,True)
         self.add_button(toolbar,'استيراد مجلد',self.import_folder)
         self.add_button(toolbar,'حفظ جلسة',self.save_session);self.add_button(toolbar,'فتح جلسة',self.load_session)
         toolbar.addStretch();self.add_button(toolbar,'تراجع',self.undo);self.add_button(toolbar,'ملاءمة الصورة',lambda:self.canvas.fit())
-        self.compare=self.add_button(toolbar,'اضغط لعرض الأصل',lambda:None);self.compare.pressed.connect(self.show_original);self.compare.released.connect(self.show_preview)
+        self.compare=self.add_button(toolbar,'مقارنة قبل / بعد',lambda:None);self.compare.setCheckable(True);self.compare.toggled.connect(self.show_preview)
         split=QSplitter();root.addWidget(split,1)
         left=QWidget();ll=QVBoxLayout(left);left.setMinimumWidth(200);left.setMaximumWidth(290)
         label=QLabel('صور الدفعة');label.setObjectName('section');ll.addWidget(label)
-        self.files=QListWidget();self.files.currentItemChanged.connect(self.select_item);ll.addWidget(self.files)
+        self.files=QListWidget();self.files.setAcceptDrops(False);self.files.setViewMode(QListView.ViewMode.IconMode);self.files.setMovement(QListView.Movement.Static)
+        self.files.setResizeMode(QListView.ResizeMode.Adjust);self.files.setWrapping(True);self.files.setWordWrap(True)
+        self.files.setIconSize(QSize(116,82));self.files.setGridSize(QSize(132,120));self.files.setSpacing(4)
+        self.files.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection);self.files.currentItemChanged.connect(self.select_item);ll.addWidget(self.files)
         self.count=QLabel('لا توجد صور');self.count.setObjectName('muted');ll.addWidget(self.count)
+        drop_tip=QLabel('اسحب الصور أو المجلدات وأفلتها هنا');drop_tip.setAlignment(Qt.AlignmentFlag.AlignCenter);drop_tip.setWordWrap(True);drop_tip.setObjectName('muted');ll.addWidget(drop_tip)
         self.add_button(ll,'إفراغ القائمة',self.clear_files)
         split.addWidget(left)
-        mid=QWidget();ml=QVBoxLayout(mid);self.canvas=Canvas();self.canvas.stroke.connect(self.on_stroke);ml.addWidget(self.canvas,1)
+        mid=QWidget();ml=QVBoxLayout(mid);self.canvas=Canvas();self.canvas.setAcceptDrops(False);self.canvas.stroke.connect(self.on_stroke);ml.addWidget(self.canvas,1)
         self.image_info=QLabel('ابدأ باستيراد صورة أو مجلد صور');self.image_info.setAlignment(Qt.AlignmentFlag.AlignCenter);ml.addWidget(self.image_info)
         tip=QLabel('عجلة الماوس للتكبير • السحب للتحريك في أداة العرض • المعاينة مخفّضة والحفظ بالدقة الأصلية');tip.setObjectName('muted');tip.setWordWrap(True);ml.addWidget(tip);split.addWidget(mid)
         panel=QWidget();panel.setMinimumWidth(360);panel.setMaximumWidth(470);outer=QVBoxLayout(panel);tabs=QTabWidget();tabs.setTabPosition(QTabWidget.TabPosition.North);outer.addWidget(tabs)
@@ -187,22 +196,56 @@ class Studio(QMainWindow):
         j.signals.done.connect(success);j.signals.error.connect(failure);j.signals.progress.connect(self.on_progress);self.pool.start(j)
     def on_progress(self,value,label):self.progress.setValue(value);self.status.setText(label)
     def import_files(self):
-        paths,_=QFileDialog.getOpenFileNames(self,'استيراد الصور','','صور JPG (*.jpg *.jpeg *.JPG *.JPEG)');self.add_paths(paths)
+        paths,_=QFileDialog.getOpenFileNames(self,'اختيار الصور من الكمبيوتر','',
+          'ملفات الصور (*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff);;صور JPG (*.jpg *.jpeg);;كل الملفات (*.*)')
+        self.add_paths(paths)
     def import_folder(self):
         folder=QFileDialog.getExistingDirectory(self,'اختر مجلد الصور')
-        if folder:self.add_paths([str(p) for p in sorted(Path(folder).iterdir()) if p.suffix.lower() in ('.jpg','.jpeg')])
+        if folder:self.add_paths(self.paths_from_inputs([folder]))
+    def paths_from_inputs(self,inputs):
+        result=[]
+        for value in inputs:
+            path=Path(value)
+            if path.is_file() and path.suffix.lower() in SUPPORTED_IMAGES:result.append(str(path))
+            elif path.is_dir():result.extend(str(p) for p in sorted(path.rglob('*')) if p.is_file() and p.suffix.lower() in SUPPORTED_IMAGES)
+        return result
     def add_paths(self,paths):
-        for path in paths:
+        added=[]
+        for path in self.paths_from_inputs(paths):
             path=str(Path(path).resolve())
             if path in self.states:continue
             self.states[path]=engine.fresh_state();self.history[path]=[]
-            item=QListWidgetItem(Path(path).name);item.setData(Qt.ItemDataRole.UserRole,path);item.setToolTip(path);self.files.addItem(item)
+            item=QListWidgetItem(Path(path).name);item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter|Qt.AlignmentFlag.AlignTop)
+            item.setData(Qt.ItemDataRole.UserRole,path);item.setToolTip(path);self.files.addItem(item);self.items_by_path[path]=item;added.append(path)
         self.count.setText(f'{len(self.states)} صورة')
+        if added:
+            self.thumbnail_queue.extend(added);self.status.setText(f'تمت إضافة {len(added)} صورة • جارٍ تجهيز الصور المصغّرة')
+            if not self.thumbnail_busy:self.thumbnail_busy=True;QTimer.singleShot(0,self.load_next_thumbnail)
         if self.current is None and self.files.count():self.files.setCurrentRow(0)
+    def load_next_thumbnail(self):
+        if not self.thumbnail_queue:self.thumbnail_busy=False;return
+        path=self.thumbnail_queue.pop(0);item=self.items_by_path.get(path)
+        if item is not None:
+            reader=QImageReader(path);reader.setAutoTransform(True);size=reader.size()
+            if size.isValid():size.scale(self.files.iconSize(),Qt.AspectRatioMode.KeepAspectRatio);reader.setScaledSize(size)
+            image=reader.read()
+            if not image.isNull():item.setIcon(QIcon(QPixmap.fromImage(image)))
+        QTimer.singleShot(1,self.load_next_thumbnail)
+    def dragEnterEvent(self,event):
+        values=[Path(u.toLocalFile()) for u in event.mimeData().urls()] if event.mimeData().hasUrls() else []
+        if any(p.is_dir() or (p.is_file() and p.suffix.lower() in SUPPORTED_IMAGES) for p in values):event.acceptProposedAction()
+        else:event.ignore()
+    def dragMoveEvent(self,event):
+        if event.mimeData().hasUrls():event.acceptProposedAction()
+        else:event.ignore()
+    def dropEvent(self,event):
+        paths=self.paths_from_inputs([u.toLocalFile() for u in event.mimeData().urls()])
+        if paths:self.add_paths(paths);event.acceptProposedAction()
+        else:event.ignore()
     def clear_files(self):
         if self.busy:return
         if self.states and QMessageBox.question(self,'إفراغ القائمة','إزالة الصور والتعديلات من هذه الجلسة؟ احفظ الجلسة أولاً إن أردت العودة إليها.')!=QMessageBox.StandardButton.Yes:return
-        self.revision+=1;self.current=None;self.files.clear();self.states.clear();self.history.clear();self.pending=[];self.original=None;self.preview=None;self.canvas.scene().clear();self.canvas.pix=None;self.face_list.clear();self.count.setText('لا توجد صور')
+        self.revision+=1;self.current=None;self.files.clear();self.states.clear();self.history.clear();self.items_by_path.clear();self.thumbnail_queue.clear();self.pending=[];self.original=None;self.preview=None;self.canvas.scene().clear();self.canvas.pix=None;self.face_list.clear();self.count.setText('لا توجد صور')
     def select_item(self,item,old):
         if not item:return
         self.current=item.data(Qt.ItemDataRole.UserRole);self.pending=[];self.original=None;self.preview=None;self.canvas.scene().clear();self.canvas.pix=None;self.canvas.zoomed=False;self.sync_controls();self.request_preview()
@@ -310,11 +353,15 @@ class Studio(QMainWindow):
     def show_preview(self,*args):
         if self.preview is None:return
         display=self.preview
+        comparing=self.compare.isChecked()
         if self.current and self.show_skin.isChecked():
             mask=engine.skin_mask(self.original,self.states[self.current])[...,None]*.35
             display=np.clip(display*(1-mask)+np.array([55,220,160])*mask,0,255).astype(np.uint8)
+        if comparing:
+            separator=np.full((display.shape[0],8,3),32,dtype=np.uint8);display=np.concatenate((self.original,separator,display),axis=1)
         self.canvas.show_image(display)
-        if self.current and self.show_boxes.isChecked():self.canvas.draw_faces(self.states[self.current]['faces'])
+        if self.current and self.show_boxes.isChecked() and not comparing:self.canvas.draw_faces(self.states[self.current]['faces'])
+        self.compare.setText('عرض النتيجة فقط' if comparing else 'مقارنة قبل / بعد')
         for s in self.pending:
             pts=s['points'];old=self.canvas.brush;self.canvas.brush=s['size']*1000
             for a,b in zip(pts,pts[1:] or pts):self.canvas.paint_segment(a,b)
@@ -369,7 +416,7 @@ class Studio(QMainWindow):
                 for key in ('strokes','removals'):assert isinstance(state[key],list)
                 states[path]=engine.normalize_state(state)
             if self.states and QMessageBox.question(self,'فتح جلسة','استبدال الجلسة الحالية؟ تأكد من حفظها أولاً.')!=QMessageBox.StandardButton.Yes:return
-            self.revision+=1;self.current=None;self.files.clear();self.states={};self.history={}
+            self.revision+=1;self.current=None;self.files.clear();self.states={};self.history={};self.items_by_path.clear();self.thumbnail_queue.clear()
             existing={k:v for k,v in states.items() if Path(k).is_file()};self.add_paths(existing)
             self.states.update(existing);self.output=data.get('output','');self.output_label.setText(self.output or 'لم يُحدد مجلد الحفظ');self.sync_controls();self.request_preview()
             if len(existing)!=len(states):QMessageBox.information(self,'صور غير موجودة',f'تعذر العثور على {len(states)-len(existing)} صورة في موقعها السابق.')
@@ -441,7 +488,7 @@ class Studio(QMainWindow):
         event.accept()
 
 def main():
-    QApplication.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeDialogs);QLocale.setDefault(QLocale('ar_IQ'))
+    QLocale.setDefault(QLocale('ar_IQ'))
     app=QApplication(sys.argv);translator=QTranslator(app);translator.load(str(engine.ROOT/'fonts'/'qtbase_ar.qm'));app.installTranslator(translator);QFontDatabase.addApplicationFont(str(engine.ROOT/'fonts'/'NotoSansArabic.ttf'));app.setFont(QFont('Noto Sans Arabic',10));app.setLayoutDirection(Qt.LayoutDirection.RightToLeft);app.setStyle('Fusion');app.setStyleSheet(STYLE)
     app.setApplicationName('Yaser Studio AI');window=Studio();window.show()
     if '--resume-session' in sys.argv:
