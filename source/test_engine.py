@@ -71,12 +71,11 @@ class ProcessingTests(unittest.TestCase):
         highlights=engine.fresh_state();highlights['local_strokes']=[{'points':[[.5,.5]],'size':.3,'erase':False,'kind':'highlights','amount':90}]
         reduced=engine.process(self.rgb,highlights);self.assertLess(float(reduced[230:285,230:285].mean()),float(self.rgb[230:285,230:285].mean()));self.assertTrue(np.array_equal(reduced[:30,:30],self.rgb[:30,:30]))
         s=engine.fresh_state();s['enhance']['upscale']=2;large=engine.process(self.rgb,s,final=True);self.assertEqual(large.shape[:2],(self.rgb.shape[0]*2,self.rgb.shape[1]*2))
-        with tempfile.TemporaryDirectory() as d:
-            ai=Path(d)/'ai.png';Image.fromarray(np.full_like(self.rgb,90)).save(ai);state=engine.fresh_state();state['faces']=[{'box':[.25,.15,.5,.55],'points':[],'enabled':True}];state['ai_result']=str(ai);result=engine.process(self.rgb,state)
-            self.assertEqual(result.shape,self.rgb.shape);self.assertGreater(float(np.abs(result.astype(float)-self.rgb).mean()),.1);self.assertTrue(np.array_equal(result[:20,:20],self.rgb[:20,:20]))
+        smooth=engine.fresh_state();smooth['local_strokes']=[{'points':[[.5,.5]],'size':.3,'erase':False,'kind':'smooth','amount':90}]
+        smoothed=engine.process(self.rgb,smooth);self.assertGreater(float(np.abs(smoothed[230:285].astype(float)-self.rgb[230:285]).mean()),.05);self.assertTrue(np.array_equal(smoothed[:30,:30],self.rgb[:30,:30]))
     def test_presets_state_and_manual_background_refine(self):
         old={'faces':[],'strokes':[],'removals':[],'settings':[1,2,3,4],'background':None};s=engine.normalize_state(old)
-        self.assertIn('tone',s);self.assertIn('background_options',s);self.assertIn('clothes_strokes',s);self.assertIn('quality_preset',s);self.assertIn('ai_result',s);self.assertEqual(s['settings'],[1,2,3,4])
+        self.assertIn('tone',s);self.assertIn('background_options',s);self.assertIn('clothes_strokes',s);self.assertIn('quality_preset',s);self.assertNotIn('ai_result',s);self.assertEqual(s['settings'],[1,2,3,4])
         add={'points':[[.02,.02]],'size':.08,'erase':False};remove={'points':[[.5,.5]],'size':.08,'erase':True}
         alpha=engine.person_alpha(self.rgb,strokes=[add,remove]);self.assertGreater(alpha[10,10],.5);self.assertLess(alpha[256,256],.5)
 
