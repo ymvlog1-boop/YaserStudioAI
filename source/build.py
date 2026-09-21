@@ -10,4 +10,4 @@ env=os.environ.copy();env['PYINSTALLER_CONFIG_DIR']=str(root/'.build-cache')
 subprocess.run([sys.executable,'-m','PyInstaller','--noconfirm','--windowed','--name','YaserStudioAI',
  '--distpath',str(root.parent/'rebuilt'),'--workpath',str(root/'.build'),'--specpath',str(root/'.build'),
  '--add-data',str(assets/'models')+os.pathsep+'models','--add-data',str(fonts)+os.pathsep+'fonts',
- '--icon',str(root/'assets/yaser.ico'),'--add-data',str(root/'assets')+os.pathsep+'assets','--collect-all','onnxruntime','--collect-all','gradio_client',str(root/'main.py')],check=True,env=env)
+ '--icon',str(root/'assets/yaser.ico'),'--add-data',str(root/'assets')+os.pathsep+'assets','--collect-all','onnxruntime',str(root/'main.py')],check=True,env=env)
