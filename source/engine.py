@@ -26,7 +26,7 @@ def detect_faces(rgb):
     return result
 
 def fresh_state():
-    return {'faces':None,'strokes':[],'removals':[],'settings':[0,0,0,0],'enhance':dict(ENHANCE_DEFAULTS),'tone':dict(TONE_DEFAULTS),'portrait':dict(PORTRAIT_DEFAULTS),'local_strokes':[],'background':None,'background_options':dict(BACKGROUND_DEFAULTS),'background_strokes':[],'portrait_blur':0,'clothes_iron':0,'clothes_strokes':[],'preset':'يدوي','style_preset':'بدون قالب شامل'}
+    return {'faces':None,'strokes':[],'removals':[],'settings':[0,0,0,0],'enhance':dict(ENHANCE_DEFAULTS),'quality_preset':'يدوي','tone':dict(TONE_DEFAULTS),'portrait':dict(PORTRAIT_DEFAULTS),'local_strokes':[],'background':None,'background_options':dict(BACKGROUND_DEFAULTS),'background_strokes':[],'portrait_blur':0,'clothes_iron':0,'clothes_strokes':[],'preset':'يدوي','style_preset':'بدون قالب شامل','ai_result':None}
 
 def normalize_state(state):
     base=fresh_state()
@@ -204,7 +204,14 @@ def iron_clothes(rgb,state):
     return cv2.cvtColor(lab,cv2.COLOR_LAB2RGB)
 
 def process(rgb,state,final=False):
-    state=normalize_state(state);out=remove_objects(rgb,state['removals']);out=enhance_image(out,state);out=adjust_tone(out,state['tone']);out=apply_local_adjustments(out,state['local_strokes']);out=iron_clothes(out,state);out=retouch(out,state)
+    state=normalize_state(state);base=rgb
+    ai_path=state.get('ai_result')
+    if ai_path and Path(ai_path).is_file():
+        try:
+            ai,_=read_image(ai_path);ai=cv2.resize(ai,(rgb.shape[1],rgb.shape[0]),interpolation=cv2.INTER_LANCZOS4) if ai.shape[:2]!=rgb.shape[:2] else ai
+            mask=face_region_mask(rgb,state)[...,None]*.68;base=np.clip(rgb.astype(np.float32)*(1-mask)+ai.astype(np.float32)*mask,0,255).astype(np.uint8) if np.any(mask) else rgb
+        except Exception:base=rgb
+    out=remove_objects(base,state['removals']);out=enhance_image(out,state);out=adjust_tone(out,state['tone']);out=apply_local_adjustments(out,state['local_strokes']);out=iron_clothes(out,state);out=retouch(out,state)
     if state.get('background'):out=replace_background(out,state['background'],state['background_options'],state['background_strokes'])
     elif state.get('portrait_blur',0):out=blur_original_background(out,state['portrait_blur'],state['background_options'],state['background_strokes'])
     scale=int(state['enhance'].get('upscale',1)) if final else 1
