@@ -9,7 +9,7 @@ ROOT=Path(getattr(sys,'_MEIPASS',Path(__file__).parent));MODEL_DIR=ROOT/'models'
 cv2.setNumThreads(6)
 TONE_DEFAULTS={k:0 for k in ('exposure','contrast','highlights','shadows','whites','blacks','temperature','tint','vibrance','saturation','clarity','dehaze')}
 ENHANCE_DEFAULTS={'denoise':0,'sharpen':0,'upscale':1}
-PORTRAIT_DEFAULTS={'skin_light':0,'skin_tone':0,'shine':0,'under_eyes':0,'eyes':0,'teeth':0}
+PORTRAIT_DEFAULTS={'skin_light':0,'skin_tone':0,'shine':0,'under_eyes':0,'eyes':0,'teeth':0,'face_detail':0}
 BACKGROUND_DEFAULTS={'edge':-2,'feather':2,'decontaminate':65,'blur':0}
 
 def read_image(path,limit=None):
@@ -26,7 +26,7 @@ def detect_faces(rgb):
     return result
 
 def fresh_state():
-    return {'faces':None,'strokes':[],'removals':[],'settings':[0,0,0,0],'enhance':dict(ENHANCE_DEFAULTS),'tone':dict(TONE_DEFAULTS),'portrait':dict(PORTRAIT_DEFAULTS),'local_strokes':[],'background':None,'background_options':dict(BACKGROUND_DEFAULTS),'background_strokes':[],'preset':'يدوي'}
+    return {'faces':None,'strokes':[],'removals':[],'settings':[0,0,0,0],'enhance':dict(ENHANCE_DEFAULTS),'tone':dict(TONE_DEFAULTS),'portrait':dict(PORTRAIT_DEFAULTS),'local_strokes':[],'background':None,'background_options':dict(BACKGROUND_DEFAULTS),'background_strokes':[],'portrait_blur':0,'clothes_iron':0,'clothes_strokes':[],'preset':'يدوي','style_preset':'بدون قالب شامل'}
 
 def normalize_state(state):
     base=fresh_state()
@@ -48,6 +48,10 @@ def skin_mask(rgb,state):
     for f in state.get('faces') or []:
         x,y,fw,fh=f['box'];x*=w;y*=h;fw*=w;fh*=h;target=excluded if not f.get('enabled',True) else mask
         cv2.ellipse(target,(round(x+fw*.5),round(y+fh*.51)),(max(1,round(fw*.45)),max(1,round(fh*.49))),0,0,360,255,-1)
+        neck=np.array([[
+          [round(x+fw*.31),round(y+fh*.84)],[round(x+fw*.69),round(y+fh*.84)],
+          [round(x+fw*.77),round(y+fh*1.52)],[round(x+fw*.23),round(y+fh*1.52)]
+        ]],np.int32);cv2.fillPoly(target,neck,255)
         if not f.get('enabled',True):continue
         pts=f.get('points',[])
         if len(pts)>=5:
@@ -60,6 +64,13 @@ def skin_mask(rgb,state):
         else:mask=np.maximum(mask,sm)
     result=cv2.GaussianBlur(mask,(0,0),max(.7,min(w,h)/700)).astype(np.float32)/255;result[excluded>0]=0
     return result
+
+def face_region_mask(rgb,state):
+    h,w=rgb.shape[:2];mask=np.zeros((h,w),np.uint8)
+    for f in state.get('faces') or []:
+        if not f.get('enabled',True):continue
+        x,y,fw,fh=f['box'];cv2.ellipse(mask,(round((x+fw*.5)*w),round((y+fh*.5)*h)),(max(1,round(fw*w*.48)),max(1,round(fh*h*.52))),0,0,360,255,-1)
+    return cv2.GaussianBlur(mask,(0,0),max(.8,min(h,w)/900)).astype(np.float32)/255
 
 def _feature_masks(rgb,state):
     h,w=rgb.shape[:2];eyes=np.zeros((h,w),np.uint8);mouth=np.zeros_like(eyes);under=np.zeros_like(eyes)
@@ -121,6 +132,10 @@ def retouch(rgb,state):
         m=eyes[...,None]*portrait['eyes']/100;target=np.clip(out.astype(np.float32)*1.12+8,0,255);out=np.clip(out*(1-m)+target*m,0,255).astype(np.uint8)
     if portrait.get('teeth',0):
         m=mouth[...,None]*portrait['teeth']/100;target=out.astype(np.float32);target[...,2]*=.82;target=target*.82+255*.18;out=np.clip(out*(1-m)+target*m,0,255).astype(np.uint8)
+    if portrait.get('face_detail',0):
+        strength=portrait['face_detail']/100;soft=cv2.GaussianBlur(out,(0,0),.75+strength*.55).astype(np.float32)
+        target=np.clip(out.astype(np.float32)*(1+strength*.9)-soft*(strength*.9),0,255);m=face_region_mask(rgb,state)[...,None]*strength
+        out=np.clip(out*(1-m)+target*m,0,255).astype(np.uint8)
     return out
 
 def remove_objects(rgb,removals):
@@ -162,9 +177,32 @@ def replace_background(rgb,path,options=None,strokes=None):
         edge=((alpha>.02)&(alpha<.98)).astype(np.float32);inner=cv2.erode((alpha>.8).astype(np.uint8),np.ones((3,3),np.uint8),iterations=2);clean=cv2.inpaint(rgb,(1-inner)*(alpha>.02).astype(np.uint8)*255,3,cv2.INPAINT_TELEA).astype(np.float32);m=edge[...,None]*decon*.55;foreground=foreground*(1-m)+clean*m
     return np.clip(foreground*alpha[...,None]+back.astype(np.float32)*(1-alpha[...,None]),0,255).astype(np.uint8)
 
+def blur_original_background(rgb,amount,options=None,strokes=None):
+    amount=int(amount or 0)
+    if amount<=0:return rgb.copy()
+    alpha=person_alpha(rgb,options,strokes);h,w=rgb.shape[:2];scale=min(1,1500/max(h,w));small=cv2.resize(rgb,(max(1,round(w*scale)),max(1,round(h*scale))),interpolation=cv2.INTER_AREA)
+    sigma=.8+amount*.18;blur=cv2.GaussianBlur(small,(0,0),sigma*scale if scale<1 else sigma)
+    if scale<1:blur=cv2.resize(blur,(w,h),interpolation=cv2.INTER_LINEAR)
+    return np.clip(rgb.astype(np.float32)*alpha[...,None]+blur.astype(np.float32)*(1-alpha[...,None]),0,255).astype(np.uint8)
+
+def iron_clothes(rgb,state):
+    amount=int(state.get('clothes_iron',0) or 0);strokes=state.get('clothes_strokes') or []
+    if amount<=0 and not strokes:return rgb.copy()
+    h,w=rgb.shape[:2];manual=stroke_mask(rgb.shape,strokes).astype(np.float32)/255 if strokes else np.zeros((h,w),np.float32)
+    if amount>0:
+        person=person_alpha(rgb)>0.58;ycc=cv2.cvtColor(rgb,cv2.COLOR_RGB2YCrCb);skin=cv2.inRange(ycc,np.array([12,122,62]),np.array([255,190,150]))>0
+        auto=(person&~skin).astype(np.float32);auto[face_region_mask(rgb,state)>.05]=0;mask=np.maximum(auto,manual)
+    else:mask=manual;amount=65
+    mask=cv2.GaussianBlur(mask,(0,0),max(1,min(h,w)/700));lab=cv2.cvtColor(rgb,cv2.COLOR_RGB2LAB);light=lab[...,0].astype(np.float32)
+    sigma_color=14+amount*.16;sigma_space=8+amount*.13;smooth=cv2.bilateralFilter(light,-1,sigma_color,sigma_space);broad=cv2.GaussianBlur(light,(0,0),2.2+amount*.035);target=smooth*.72+broad*.28
+    gx=cv2.Sobel(light,cv2.CV_32F,1,0,ksize=3);gy=cv2.Sobel(light,cv2.CV_32F,0,1,ksize=3);edge=np.clip((cv2.magnitude(gx,gy)-10)/42,0,1)
+    mix=np.clip(mask*(amount/100)*.88*(1-edge),0,.9);lab[...,0]=np.clip(light*(1-mix)+target*mix,0,255).astype(np.uint8)
+    return cv2.cvtColor(lab,cv2.COLOR_LAB2RGB)
+
 def process(rgb,state,final=False):
-    state=normalize_state(state);out=remove_objects(rgb,state['removals']);out=enhance_image(out,state);out=adjust_tone(out,state['tone']);out=apply_local_adjustments(out,state['local_strokes']);out=retouch(out,state)
+    state=normalize_state(state);out=remove_objects(rgb,state['removals']);out=enhance_image(out,state);out=adjust_tone(out,state['tone']);out=apply_local_adjustments(out,state['local_strokes']);out=iron_clothes(out,state);out=retouch(out,state)
     if state.get('background'):out=replace_background(out,state['background'],state['background_options'],state['background_strokes'])
+    elif state.get('portrait_blur',0):out=blur_original_background(out,state['portrait_blur'],state['background_options'],state['background_strokes'])
     scale=int(state['enhance'].get('upscale',1)) if final else 1
     if scale in (2,4):out=cv2.resize(out,None,fx=scale,fy=scale,interpolation=cv2.INTER_LANCZOS4)
     return out
@@ -178,5 +216,10 @@ def save_new(rgb,source,folder,meta,fmt='JPG'):
         except FileExistsError:i+=1
     try:
         with handle:Image.fromarray(rgb).save(handle,format='PNG' if fmt=='PNG' else 'JPEG',**kwargs)
+    except BaseException:dest.unlink(missing_ok=True);raise
+    try:
+        with Image.open(dest) as check:
+            if check.size!=(rgb.shape[1],rgb.shape[0]):raise OSError('أبعاد الملف المحفوظ لا تطابق نتيجة المعالجة')
+            check.verify()
     except BaseException:dest.unlink(missing_ok=True);raise
     return str(dest)

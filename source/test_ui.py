@@ -1,5 +1,6 @@
 import os,sys,time,tempfile,copy,json
 from pathlib import Path
+import numpy as np
 os.environ['QT_QPA_PLATFORM']='offscreen'
 os.environ['YASER_DISABLE_UPDATE_CHECK']='1'
 sys.path.insert(0,str(Path(__file__).resolve().parent))
@@ -44,12 +45,15 @@ with tempfile.TemporaryDirectory() as d:
     QTest.mousePress(w.canvas.viewport(),Qt.MouseButton.LeftButton,pos=center);QTest.mouseMove(w.canvas.viewport(),center+QPoint(15,15));QTest.mouseRelease(w.canvas.viewport(),Qt.MouseButton.LeftButton,pos=center+QPoint(15,15));wait()
     assert len(w.states[w.current]['strokes'])==1
     w.mode.setCurrentIndex(3);w.on_stroke({'points':[[.1,.1]],'size':.04,'erase':False});w.commit_removal();wait();assert len(w.states[w.current]['removals'])==1;w.undo();wait();assert not w.states[w.current]['removals']
-    w.output=str(p/'نتائج');w.export(True);wait();assert len(list((p/'نتائج').glob('*.jpg')))==3
-    assert all(Image.open(f).size==(512,512) for f in (p/'نتائج').glob('*.jpg'))
+    w.style_preset.setCurrentText('استوديو رسمي');w.apply_auto_style();wait();assert w.states[w.current]['portrait']['face_detail']==46 and w.states[w.current]['portrait_blur']==34
+    w.portrait_blur.setValue(0);w.tone_sliders['exposure'].setValue(20);wait();expected=engine.process(engine.read_image(w.current)[0],copy.deepcopy(w.states[w.current]),final=True)
+    current_stem=Path(w.current).stem;w.fmt.setCurrentIndex(1);w.output=str(p/'نتائج');w.export(True);wait();saved=list((p/'نتائج').glob('*.png'));assert len(saved)==3
+    assert all(Image.open(f).size==(512,512) for f in saved);actual=np.array(Image.open(next(f for f in saved if f.stem.startswith(current_stem))))
+    assert np.array_equal(actual,expected) and not np.array_equal(actual,engine.read_image(w.current)[0])
     QFileDialog.getSaveFileName=lambda *a,**k:(str(p/'session.yaser.json'),'')
     w.save_session();assert (p/'session.yaser.json').exists()
     QFileDialog.getOpenFileName=lambda *a,**k:(str(p/'session.yaser.json'),'')
     w.load_session();wait();assert len(w.states)==3
-    w.mode.setCurrentIndex(0);w.grab().save(str(Path(__file__).resolve().parents[1]/'interface.png'))
+    w.mode.setCurrentIndex(0);w.compare.setChecked(True);w.show_preview();w.grab().save(str(Path(__file__).resolve().parents[1]/'interface.png'))
     w.states.clear();w.close()
 print('PASS: native-ready import, thumbnails, drag/drop, before/after, detection, sliders, batch, face exclusion, brush, inpaint undo, export, session, RTL screenshot')

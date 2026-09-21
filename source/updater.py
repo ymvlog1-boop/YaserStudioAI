@@ -1,7 +1,7 @@
 """User-selected offline updates, installed alongside the running version."""
 from pathlib import Path,PurePosixPath
 import json,zipfile,hashlib,tempfile,shutil,os
-VERSION='0.4.1'
+VERSION='0.5.0'
 DEFAULT_REPO='ymvlog1-boop/YaserStudioAI'
 PREFIX='YaserStudioAI/Windows/YaserStudioAI/'
 REQUIRED={'YaserStudioAI.exe','_internal/models/u2net_human_seg.onnx','_internal/models/face_detection_yunet_2023mar.onnx'}

@@ -19,6 +19,9 @@ class ProcessingTests(unittest.TestCase):
         faces[0]['enabled']=False;m=engine.skin_mask(rgb,s)
         f=faces[0]['box'];x=int((f[0]+f[2]/2)*rgb.shape[1]);y=int((f[1]+f[3]/2)*rgb.shape[0]);self.assertEqual(m[y,x],0)
         self.assertGreater(float(m.max()),.1)
+        skin=np.full((240,160,3),(190,140,110),np.uint8);neck_state=engine.fresh_state();neck_state['faces']=[{'box':[.3,.12,.4,.32],'points':[],'enabled':True}]
+        neck=engine.skin_mask(skin,neck_state);self.assertGreater(float(neck[125,80]),.2)
+        neck_state['faces'][0]['enabled']=False;self.assertEqual(float(engine.skin_mask(skin,neck_state)[125,80]),0)
     def test_brush_and_each_slider(self):
         rng=np.random.default_rng(3);rgb=np.clip(rng.normal(145,24,(256,256,3)),0,255).astype(np.uint8)
         s=engine.fresh_state();s['faces']=[];s['strokes']=[{'points':[[.5,.5]],'size':.4,'erase':False}]
@@ -50,7 +53,16 @@ class ProcessingTests(unittest.TestCase):
             bg=Path(d)/'bg.png';Image.new('RGB',(300,200),(30,150,200)).save(bg)
             out=engine.replace_background(self.rgb,bg);self.assertEqual(out.shape,self.rgb.shape)
             Image.fromarray(out).save(Path(__file__).parents[1]/'background-test.png')
+        state=engine.fresh_state();state['portrait_blur']=65;portrait=engine.process(self.rgb,state)
+        self.assertGreater(float(np.abs(portrait[:150].astype(float)-self.rgb[:150]).mean()),.2)
         print('Background inference seconds:',round(time.time()-start,2))
+    def test_face_recovery_and_clothes_ironing_preserve_color(self):
+        state=engine.fresh_state();state['faces']=engine.detect_faces(self.rgb);state['portrait']['face_detail']=70
+        recovered=engine.retouch(self.rgb,state);self.assertGreater(float(np.abs(recovered.astype(float)-self.rgb).mean()),.01)
+        y,x=np.mgrid[:240,:180];lab=np.empty((240,180,3),np.uint8);lab[...,0]=np.clip(145+22*np.sin(y/3)+10*np.sin(x/7),0,255);lab[...,1]=143;lab[...,2]=164
+        cloth=__import__('cv2').cvtColor(lab,__import__('cv2').COLOR_LAB2RGB);iron=engine.fresh_state();iron['clothes_strokes']=[{'points':[[.05,.5],[.95,.5]],'size':.9,'erase':False}]
+        pressed=engine.iron_clothes(cloth,iron);before=__import__('cv2').cvtColor(cloth,__import__('cv2').COLOR_RGB2LAB);after=__import__('cv2').cvtColor(pressed,__import__('cv2').COLOR_RGB2LAB)
+        self.assertLess(float(after[...,0].std()),float(before[...,0].std()));self.assertLess(float(np.abs(after[...,1:].astype(float)-before[...,1:].astype(float)).mean()),1.2)
     def test_light_color_local_and_upscale(self):
         s=engine.fresh_state();s['tone'].update(exposure=35,shadows=40,temperature=20,vibrance=30,clarity=15)
         corrected=engine.process(self.rgb,s);self.assertEqual(corrected.shape,self.rgb.shape);self.assertGreater(float(corrected.mean()),float(self.rgb.mean()))
@@ -59,7 +71,7 @@ class ProcessingTests(unittest.TestCase):
         s=engine.fresh_state();s['enhance']['upscale']=2;large=engine.process(self.rgb,s,final=True);self.assertEqual(large.shape[:2],(self.rgb.shape[0]*2,self.rgb.shape[1]*2))
     def test_presets_state_and_manual_background_refine(self):
         old={'faces':[],'strokes':[],'removals':[],'settings':[1,2,3,4],'background':None};s=engine.normalize_state(old)
-        self.assertIn('tone',s);self.assertIn('background_options',s);self.assertEqual(s['settings'],[1,2,3,4])
+        self.assertIn('tone',s);self.assertIn('background_options',s);self.assertIn('clothes_strokes',s);self.assertEqual(s['settings'],[1,2,3,4])
         add={'points':[[.02,.02]],'size':.08,'erase':False};remove={'points':[[.5,.5]],'size':.08,'erase':True}
         alpha=engine.person_alpha(self.rgb,strokes=[add,remove]);self.assertGreater(alpha[10,10],.5);self.assertLess(alpha[256,256],.5)
 
