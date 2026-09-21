@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBo
  QListWidget,QListWidgetItem,QSlider,QFileDialog,QMessageBox,QGraphicsView,QGraphicsScene,QComboBox,
  QCheckBox,QProgressBar,QScrollArea,QFrame,QSplitter,QTabWidget,QInputDialog,QListView,QAbstractItemView,QLineEdit)
 import engine
-import updater, online_ai, subprocess, os
+import updater, subprocess, os
 
 SUPPORTED_IMAGES={'.jpg','.jpeg','.png','.webp','.bmp','.tif','.tiff'}
 
@@ -117,19 +117,19 @@ class Studio(QMainWindow):
         self.setAcceptDrops(True)
         self.states={};self.history={};self.layers={};self.layer_serial={};self.current=None;self.original=None;self.preview=None;self.pending=[];self.loading=False
         self.items_by_path={};self.thumbnail_queue=[];self.thumbnail_busy=False
-        self.app_settings=QSettings('YaserStudioAI','Studio');self.output=str(self.app_settings.value('output_folder','') or '');self.hf_token=''
+        self.app_settings=QSettings('YaserStudioAI','Studio');self.output=str(self.app_settings.value('output_folder','') or '')
         self.update_settings=QSettings('YaserStudioAI','Updates');
         if '--smoke-test' not in sys.argv and not os.environ.get('YASER_DISABLE_UPDATE_CHECK'):QTimer.singleShot(6000,lambda:self.check_online(True))
         self.pool=QThreadPool();self.pool.setMaxThreadCount(1);self.jobs=set();self.revision=0;self.busy=False;self.cancel=threading.Event()
         self.timer=QTimer();self.timer.setSingleShot(True);self.timer.setInterval(400);self.timer.timeout.connect(self.request_preview)
         central=QWidget();self.setCentralWidget(central);root=QVBoxLayout(central);root.setContentsMargins(22,18,22,16)
         header=QHBoxLayout();brand=QLabel('Yaser Studio AI');brand.setObjectName('brand');header.addWidget(brand)
-        sub=QLabel('استوديو الصور  /  معالجة محلية وAI اختياري');sub.setObjectName('muted');header.addWidget(sub);header.addStretch();self.add_button(header,'تحديث من ملف',self.install_update);self.add_button(header,'تحديثات الإنترنت',self.configure_updates);root.addLayout(header)
+        sub=QLabel('استوديو الصور  /  معالجة محلية على جهازك');sub.setObjectName('muted');header.addWidget(sub);header.addStretch();self.add_button(header,'تحديث من ملف',self.install_update);self.add_button(header,'تحديثات الإنترنت',self.configure_updates);root.addLayout(header)
         toolbar=QHBoxLayout();root.addLayout(toolbar)
         self.add_button(toolbar,'استيراد صور',self.import_files,True)
         self.add_button(toolbar,'استيراد مجلد',self.import_folder)
         self.add_button(toolbar,'حفظ جلسة',self.save_session);self.add_button(toolbar,'فتح جلسة',self.load_session)
-        toolbar.addStretch();self.add_button(toolbar,'تراجع',self.undo);self.add_button(toolbar,'ملاءمة الصورة',lambda:self.canvas.fit())
+        toolbar.addStretch();self.add_button(toolbar,'تراجع خطوة واحدة',self.undo);self.add_button(toolbar,'ملاءمة الصورة',lambda:self.canvas.fit())
         self.compare=self.add_button(toolbar,'عرض صورة واحدة',lambda:None);self.compare.setCheckable(True);self.compare.setChecked(True);self.compare.toggled.connect(self.show_preview)
         split=QSplitter();root.addWidget(split,1)
         left=QWidget();ll=QHBoxLayout(left);ll.setContentsMargins(4,2,4,2);left.setMinimumHeight(72);left.setMaximumHeight(86)
@@ -149,11 +149,7 @@ class Studio(QMainWindow):
         pl.addWidget(QLabel('التحسين التلقائي'));self.quality_preset=QComboBox();self.quality_preset.addItems(['يدوي','تلقائي خفيف','تلقائي طبيعي','تلقائي قوي','تفاصيل عالية']);self.quality_preset.currentIndexChanged.connect(self.quality_preset_changed);pl.addWidget(self.quality_preset)
         self.enhance_sliders={}
         for key,name in [('denoise','إزالة التشويش'),('sharpen','استرجاع الحدة')]:self.enhance_sliders[key]=self.control_slider(pl,name,0,100)
-        self.section(pl,'تحسين AI عبر الإنترنت')
-        self.add_button(pl,'تحسين الوجه بالذكاء الاصطناعي',self.enhance_online,True)
-        self.add_button(pl,'إعداد مفتاح Hugging Face المجاني',self.configure_ai)
-        self.add_button(pl,'إلغاء نتيجة تحسين الإنترنت',self.clear_online_ai)
-        note=QLabel('اختياري: يرفع الصورة الحالية إلى خدمة GFPGAN العامة في Hugging Face بعد موافقتك. الحساب المجاني يمنح حصة محدودة وقد يكون هناك انتظار.');note.setObjectName('muted');note.setWordWrap(True);pl.addWidget(note);pl.addStretch()
+        note=QLabel('جميع أدوات تحسين الجودة في هذه القائمة تعمل محلياً على جهازك.');note.setObjectName('muted');note.setWordWrap(True);pl.addWidget(note);pl.addStretch()
 
         color_tab=QWidget();tabs.addTab(color_tab,'٢ الضوء');pl=QVBoxLayout(color_tab);self.section(pl,'الإضاءة والألوان')
         self.tone_sliders={}
@@ -173,16 +169,17 @@ class Studio(QMainWindow):
         self.show_boxes=QCheckBox('إظهار إطارات الوجوه');self.show_boxes.setChecked(False);self.show_boxes.toggled.connect(self.show_preview);pl.addWidget(self.show_boxes);self.show_skin=QCheckBox();self.show_skin.setChecked(False)
         self.add_button(pl,'تطبيق كل الإعدادات على الدفعة',self.apply_all,True)
 
-        region_tab=QWidget();tabs.addTab(region_tab,'٤ الكي والإزالة');pl=QVBoxLayout(region_tab);self.section(pl,'كي الملابس')
+        region_tab=QWidget();tabs.addTab(region_tab,'٤ الفرشاة والإزالة');pl=QVBoxLayout(region_tab);self.section(pl,'كي الملابس تلقائياً')
         self.clothes_iron=self.control_slider(pl,'قوة الكي التلقائي',0,100,0)
-        self.add_button(pl,'تفعيل فرشاة كي الملابس',lambda:self.mode.setCurrentIndex(0),True)
-        clothes_note=QLabel('مرّر الفرشاة على منطقة الملابس؛ تُنعّم التجاعيد فوراً مع الحفاظ على لون القماش.');clothes_note.setWordWrap(True);clothes_note.setObjectName('muted');pl.addWidget(clothes_note)
-        self.section(pl,'الفرشاة الدائرية الشفافة')
-        self.mode=QComboBox();self.mode.addItems(['كي الملابس بالفرشاة','إزالة عنصر من الخلفية','تفتيح المنطقة','تغميق المنطقة','تلوين المنطقة','خفض الإضاءة العالية']);self.mode.currentIndexChanged.connect(self.mode_changed);pl.addWidget(self.mode)
+        self.add_button(pl,'تطبيق كي تلقائي متوسط',self.auto_iron,True)
+        clothes_note=QLabel('حرّك القوة لمعاينة الكي على ملابس الشخص، أو استخدم فرشاة الكي أدناه لمنطقة محددة.');clothes_note.setWordWrap(True);clothes_note.setObjectName('muted');pl.addWidget(clothes_note)
+        self.section(pl,'تعديل منطقة محددة بالفرشاة')
+        self.mode=QComboBox();self.mode.addItems(['تنعيم البشرة','إضاءة منطقة محددة — ناعمة','تفتيح مباشر','تغميق المنطقة','تلوين المنطقة','خفض الإضاءة العالية','كي الملابس','إزالة عنصر']);self.mode.currentIndexChanged.connect(self.mode_changed);pl.addWidget(self.mode)
         pl.addWidget(QLabel('حجم الفرشاة'));bs=QSlider(Qt.Orientation.Horizontal);bs.setRange(3,180);bs.setValue(25);bs.valueChanged.connect(self.canvas.set_brush);pl.addWidget(bs)
         self.local_amount=self.control_slider(pl,'قوة التأثير',1,100,35)
-        self.add_button(pl,'تنفيذ إزالة العنصر المحدد',self.commit_removal,True)
-        self.add_button(pl,'مسح التحديد الأحمر',self.clear_pending)
+        self.brush_help=QLabel();self.brush_help.setWordWrap(True);self.brush_help.setObjectName('muted');pl.addWidget(self.brush_help)
+        self.apply_brush_button=self.add_button(pl,'تنفيذ التعديل على التحديد',self.apply_brush_selection,True)
+        self.add_button(pl,'مسح التحديد والبدء من جديد',self.clear_pending)
         self.section(pl,'طبقات التعديل')
         self.layer_list=QListWidget();self.layer_list.setMaximumHeight(92);pl.addWidget(self.layer_list)
         self.add_button(pl,'الرجوع إلى الطبقة المحددة',self.restore_layer)
@@ -190,11 +187,12 @@ class Studio(QMainWindow):
         self.background_sliders={};pl.addStretch();scroll=QScrollArea();scroll.setMinimumWidth(270);scroll.setMaximumWidth(320);scroll.setWidgetResizable(True);scroll.setWidget(panel);split.addWidget(scroll);split.setSizes([1090,285]);root.addWidget(left)
         foot=QHBoxLayout();root.addLayout(foot);self.add_button(foot,'اختيار مجلد الإخراج',self.choose_output)
         self.output_label=QLabel(self.output or 'لم يُحدد مجلد الحفظ');self.output_label.setObjectName('muted');foot.addWidget(self.output_label,1)
-        self.fmt=QComboBox();self.fmt.addItems(['JPG — جودة 98','PNG — بدون فقد']);foot.addWidget(self.fmt)
+        save_note=QLabel('الحفظ: JPG عالي الجودة بالدقة الأصلية');save_note.setObjectName('muted');foot.addWidget(save_note)
         self.add_button(foot,'حفظ الصورة الحالية',lambda:self.export(False));self.add_button(foot,'حفظ الدفعة كاملة',lambda:self.export(True),True)
         self.stop=self.add_button(foot,'إيقاف',self.cancel.set);self.stop.setEnabled(False)
         self.progress=QProgressBar();self.progress.setRange(0,100);self.progress.setValue(0);root.addWidget(self.progress)
-        self.status=QLabel('جاهز • الصور الأصلية لا تُعدّل • الرفع للإنترنت لا يحدث إلا بأمر منك');root.addWidget(self.status)
+        self.status=QLabel('جاهز • الصور الأصلية لا تُعدّل • المعالجة محلية على جهازك');root.addWidget(self.status)
+        self.mode_changed(0)
         QShortcut(QKeySequence('Ctrl+Z'),self,activated=self.undo)
     def add_button(self,layout,title,fn,primary=False):
         b=QPushButton(title);b.clicked.connect(fn)
@@ -364,45 +362,58 @@ class Studio(QMainWindow):
         if row>=len(faces):return
         self.checkpoint();faces[row]['enabled']=item.checkState()==Qt.CheckState.Checked;self.schedule()
     def mode_changed(self,i):
-        self.canvas.set_mode(['clothes','remove','local_brighten','local_darken','local_saturate','local_highlights'][i])
+        modes=['local_smooth','local_relight','local_brighten','local_darken','local_saturate','local_highlights','clothes','remove']
+        self.canvas.set_mode(modes[i])
+        help_texts=[
+          'ارسم بالدائرة فوق البشرة المطلوبة، اختر قوة التأثير، ثم اضغط تنفيذ.',
+          'كبّر حجم الفرشاة وحدد المكان مثل أسفل الصورة؛ الإضاءة ترتفع تدريجياً بحواف ناعمة وتحافظ على التفاصيل.',
+          'ارسم فوق المكان المطلوب تفتيحه، ثم اضغط تنفيذ.',
+          'ارسم فوق المكان المطلوب تغميقه، ثم اضغط تنفيذ.',
+          'ارسم فوق المكان المطلوب تقوية لونه، ثم اضغط تنفيذ.',
+          'ارسم فوق المنطقة شديدة الإضاءة لتخفيفها، ثم اضغط تنفيذ.',
+          'ارسم فوق تجاعيد الملابس فقط، ثم اضغط تنفيذ الكي.',
+          'غطِّ العنصر كله بالتحديد الأحمر، ثم اضغط تنفيذ الإزالة.'
+        ]
+        if hasattr(self,'brush_help'):self.brush_help.setText('الخطوة ١: '+help_texts[i]+'\nالخطوة ٢: يمكنك الرسم أكثر من مرة قبل التنفيذ.')
+        if hasattr(self,'apply_brush_button'):
+            self.apply_brush_button.setText('تنفيذ إزالة العنصر' if modes[i]=='remove' else ('تنفيذ كي المنطقة' if modes[i]=='clothes' else 'تنفيذ التعديل على المنطقة'))
+        self.pending=[]
         if self.compare.isChecked():self.compare.setChecked(False)
     def on_stroke(self,s):
         if not self.current:return
-        if self.canvas.mode=='remove':self.pending.append(s);self.status.setText('تحديد إزالة جاهز — اضغط «إزالة العنصر المحدد»')
-        elif self.canvas.mode.startswith('local_'):
-            self.checkpoint();s['kind']=self.canvas.mode.removeprefix('local_');s['amount']=self.local_amount.value();self.states[self.current]['local_strokes'].append(s);self.schedule()
-        elif self.canvas.mode.startswith('bg_'):
-            self.checkpoint();s['erase']=self.canvas.mode=='bg_erase';self.states[self.current]['background_strokes'].append(s);self.schedule()
-        elif self.canvas.mode=='clothes':
-            self.checkpoint();s['erase']=False;self.states[self.current]['clothes_strokes'].append(s);self.schedule()
-        else:self.checkpoint();self.states[self.current]['strokes'].append(s);self.schedule()
-    def commit_removal(self):
-        if not self.current or not self.pending:return
-        self.checkpoint();self.states[self.current]['removals'].append(copy.deepcopy(self.pending));self.pending=[];self.schedule()
-    def clear_pending(self):self.pending=[];self.show_preview()
-    def enhance_online(self):
-        if not self.current or self.busy:return
-        answer=QMessageBox.question(self,'تحسين AI عبر الإنترنت','سيتم رفع الصورة الحالية إلى مساحة GFPGAN عامة على Hugging Face لمعالجتها ثم تنزيل النتيجة. الخدمة خارجية ولها حصة مجانية محدودة. هل تسمح برفع هذه الصورة الآن؟')
-        if answer!=QMessageBox.StandardButton.Yes:return
-        path=self.current;self.busy=True;self.status.setText('جارٍ رفع الصورة وتحسينها بالذكاء الاصطناعي…')
-        token=self.hf_token
-        def work(signals):return online_ai.enhance(path,token)
-        def done(result):
-            self.busy=False
-            if path not in self.states:return
-            self.current=path;self.checkpoint();self.states[path]['ai_result']=result;self.schedule();self.status.setText('اكتمل تحسين AI للصورة الحالية؛ النتيجة محفوظة كطبقة ويمكن التراجع عنها')
-        self.run_job(work,done)
-    def configure_ai(self):
-        token,ok=QInputDialog.getText(self,'مفتاح Hugging Face','الصق مفتاح Read من حساب Hugging Face المجاني. يبقى المفتاح في الذاكرة حتى تغلق البرنامج ولا يُحفظ على القرص.',QLineEdit.EchoMode.Password)
-        if ok:
-            self.hf_token=token.strip();self.status.setText('تم إعداد خدمة AI لهذه الجلسة' if self.hf_token else 'سيُستخدم الوصول العام بدون حساب')
-    def clear_online_ai(self):
-        if self.current and self.states[self.current].get('ai_result'):
-            self.checkpoint();self.states[self.current]['ai_result']=None;self.schedule();self.status.setText('أُلغيت نتيجة تحسين الإنترنت وعادت المعالجة إلى الصورة الأصلية')
+        s['mode']=self.canvas.mode;self.pending.append(s);self.show_preview()
+        self.status.setText(f'تم تحديد المنطقة ({len(self.pending)} ضربة فرشاة) — اضغط زر التنفيذ لتطبيقها كطبقة واحدة')
+    def apply_brush_selection(self):
+        if not self.current:
+            return
+        if not self.pending:
+            QMessageBox.information(self,'حدد المنطقة أولاً','ارسم بالفرشاة الدائرية فوق المنطقة المطلوبة، ثم اضغط زر التنفيذ.');return
+        mode=self.canvas.mode;self.checkpoint();selected=copy.deepcopy(self.pending);self.pending=[]
+        if mode=='remove':
+            self.states[self.current]['removals'].append(selected);label='إزالة العنصر'
+        elif mode=='clothes':
+            for s in selected:s['erase']=False;s['amount']=self.local_amount.value()
+            self.states[self.current]['clothes_strokes'].extend(selected);label='كي الملابس بالفرشاة'
+        else:
+            kind=mode.removeprefix('local_')
+            for s in selected:s['kind']=kind;s['amount']=self.local_amount.value()
+            self.states[self.current]['local_strokes'].extend(selected);label={'smooth':'تنعيم البشرة','relight':'إضاءة ناعمة','brighten':'تفتيح','darken':'تغميق','saturate':'تلوين','highlights':'خفض الإضاءة العالية'}.get(kind,'تعديل موضعي')
+        self.schedule();self.status.setText(f'تم تطبيق «{label}» كطبقة مستقلة — اضغط تراجع خطوة واحدة للرجوع عنها')
+    def auto_iron(self):
+        if not self.current:return
+        self.checkpoint();self.clothes_iron.setValue(65);self.status.setText('تم تطبيق كي تلقائي متوسط — عدّل قوة الكي إذا رغبت')
+    def commit_removal(self):self.apply_brush_selection()
+    def clear_pending(self):self.pending=[];self.show_preview();self.status.setText('مُسح تحديد الفرشاة')
     def undo(self):
         if not self.current:return
-        if self.pending:self.pending.pop();self.show_preview();return
-        if self.history[self.current]:self.states[self.current]=self.history[self.current].pop();self.sync_controls();self.schedule()
+        if self.pending:
+            self.pending.pop();self.show_preview();self.status.setText('تم التراجع عن آخر ضربة تحديد');return
+        if self.history[self.current]:
+            previous=self.history[self.current].pop();self.states[self.current]=previous
+            stack=self.layers.get(self.current,[])
+            if len(stack)>1 and stack[-1]['state']==previous:stack.pop()
+            self.sync_controls();self.schedule();self.status.setText(f'تم الرجوع خطوة واحدة • بقي {len(self.history[self.current])} تعديل سابق')
+        else:self.status.setText('أنت الآن عند الصورة الأصلية ولا توجد خطوة أقدم')
     def apply_all(self):
         if not self.current:return
         source=self.states[self.current]
@@ -426,7 +437,7 @@ class Studio(QMainWindow):
         self.revision+=1;revision=self.revision;path=self.current;state=engine.normalize_state(copy.deepcopy(self.states[path]));self.status.setText('جارٍ تجهيز المعاينة وكشف الوجوه…')
         def work(signals):
             if revision!=self.revision:return None
-            rgb,_=engine.read_image(path,1400)
+            rgb,_=engine.read_image(path)
             if state['faces'] is None:state['faces']=engine.detect_faces(rgb)
             if revision!=self.revision:return None
             out=engine.process(rgb,state)
@@ -439,7 +450,7 @@ class Studio(QMainWindow):
             from PIL import Image
             with Image.open(path) as im:w,h=im.size
             self.image_info.setText(f'{Path(path).name}  •  {w} × {h}  •  {len(faces)} وجه')
-            self.status.setText('المعاينة جاهزة • احفظ النسخة الجديدة عند الانتهاء')
+            self.status.setText('المعاينة جاهزة بالدقة الأصلية • يمكنك التكبير وفحص أدق التفاصيل')
         self.run_job(work,done)
     def show_original(self):
         if self.original is not None:self.canvas.show_image(self.original)
@@ -470,10 +481,10 @@ class Studio(QMainWindow):
     def export(self,all_images):
         if self.busy or not self.current:return
         if self.pending:
-            QMessageBox.information(self,'تحديد غير مطبق','طبّق إزالة العنصر أو امسح تحديد الإزالة قبل الحفظ.');return
+            QMessageBox.information(self,'تحديد غير مطبق','اضغط زر تنفيذ التعديل على المنطقة، أو امسح التحديد قبل الحفظ.');return
         if not self.output:self.choose_output()
         if not self.output:return
-        paths=list(self.states) if all_images else [self.current];states=copy.deepcopy(self.states);folder=self.output;fmt='PNG' if self.fmt.currentIndex()==1 else 'JPG'
+        paths=list(self.states) if all_images else [self.current];states=copy.deepcopy(self.states);folder=self.output;fmt='JPG'
         self.timer.stop();self.revision+=1;self.busy=True;self.cancel.clear();self.stop.setEnabled(True);self.progress.setValue(0)
         def work(signals):
             saved=[];errors=[]
