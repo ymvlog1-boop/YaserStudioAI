@@ -11,7 +11,7 @@ from PySide6.QtGui import QFontDatabase,QFont
 from PySide6.QtTest import QTest
 from PIL import Image
 from main import Studio,STYLE
-import engine,online_ai
+import engine
 app=QApplication([]);QFontDatabase.addApplicationFont(str(engine.ROOT/'fonts/NotoSansArabic.ttf'));app.setFont(QFont('Noto Sans Arabic',10));app.setStyle('Fusion');app.setStyleSheet(STYLE);app.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
 w=Studio();w.show();QMessageBox.exec=lambda self:0
 QMessageBox.question=lambda *a:QMessageBox.StandardButton.Yes
@@ -53,22 +53,23 @@ with tempfile.TemporaryDirectory() as d:
     w.layer_list.setCurrentRow(w.layer_list.count()-1);w.restore_layer();wait();assert w.sliders[0].value()==0
     w.sliders[3].setValue(40);w.apply_all();wait();assert all(s['settings'][3]==40 for s in w.states.values())
     item=w.face_list.item(0);item.setCheckState(Qt.CheckState.Unchecked);wait();assert not w.states[w.current]['faces'][0]['enabled'];w.undo();wait()
-    w.mode.setCurrentIndex(2);center=w.canvas.mapFromScene(250,180)
+    w.mode.setCurrentIndex(0);center=w.canvas.mapFromScene(250,180)
     QTest.mousePress(w.canvas.viewport(),Qt.MouseButton.LeftButton,pos=center);QTest.mouseMove(w.canvas.viewport(),center+QPoint(15,15));QTest.mouseRelease(w.canvas.viewport(),Qt.MouseButton.LeftButton,pos=center+QPoint(15,15));wait()
-    assert len(w.states[w.current]['local_strokes'])==1
-    w.mode.setCurrentIndex(1);w.on_stroke({'points':[[.1,.1]],'size':.04,'erase':False});w.commit_removal();wait();assert len(w.states[w.current]['removals'])==1;w.undo();wait();assert not w.states[w.current]['removals']
+    assert len(w.pending)==1 and not w.states[w.current]['local_strokes'];w.apply_brush_selection();wait();assert w.states[w.current]['local_strokes'][-1]['kind']=='smooth'
+    w.mode.setCurrentIndex(1);w.on_stroke({'points':[[.5,.8]],'size':.25,'erase':False});w.apply_brush_selection();wait();assert w.states[w.current]['local_strokes'][-1]['kind']=='relight'
+    w.mode.setCurrentIndex(6);w.on_stroke({'points':[[.3,.6],[.7,.6]],'size':.2,'erase':False});w.apply_brush_selection();wait();assert len(w.states[w.current]['clothes_strokes'])==1
+    w.mode.setCurrentIndex(7);w.on_stroke({'points':[[.1,.1]],'size':.04,'erase':False});w.apply_brush_selection();wait();assert len(w.states[w.current]['removals'])==1;w.undo();wait();assert not w.states[w.current]['removals']
     w.quality_preset.setCurrentText('تلقائي قوي');wait();assert w.states[w.current]['enhance']['denoise']==38 and w.states[w.current]['portrait']['face_detail']==42
     w.preset.setCurrentText('تنقية قوية جداً');wait();assert w.states[w.current]['settings'][0]==82
     w.style_preset.setCurrentText('استوديو رسمي');w.apply_auto_style();wait();assert w.states[w.current]['portrait']['face_detail']==44 and w.states[w.current]['portrait_blur']==8
-    ai_file=p/'ai.png';sample.save(ai_file);online_ai.enhance=lambda path,token=None:str(ai_file);w.app_settings.setValue('online_ai_consent',True);w.enhance_online();wait();assert w.states[w.current]['ai_result']==str(ai_file);w.clear_online_ai();wait();assert w.states[w.current]['ai_result'] is None
     w.tone_sliders['exposure'].setValue(20);wait();expected=engine.process(engine.read_image(w.current)[0],copy.deepcopy(w.states[w.current]),final=True)
-    current_stem=Path(w.current).stem;w.fmt.setCurrentIndex(1);w.output=str(p/'نتائج');w.export(True);wait();saved=list((p/'نتائج').glob('*.png'));assert len(saved)==3
+    current_stem=Path(w.current).stem;w.output=str(p/'نتائج');w.export(True);wait();saved=list((p/'نتائج').glob('*.jpg'));assert len(saved)==3
     assert all(Image.open(f).size==(512,512) for f in saved);actual=np.array(Image.open(next(f for f in saved if f.stem.startswith(current_stem))))
-    assert np.array_equal(actual,expected) and not np.array_equal(actual,engine.read_image(w.current)[0])
+    assert np.abs(actual.astype(float)-expected).mean()<3 and not np.array_equal(actual,engine.read_image(w.current)[0])
     QFileDialog.getSaveFileName=lambda *a,**k:(str(p/'session.yaser.json'),'')
     w.save_session();assert (p/'session.yaser.json').exists()
     QFileDialog.getOpenFileName=lambda *a,**k:(str(p/'session.yaser.json'),'')
     w.load_session();wait();assert len(w.states)==3 and w.layers[w.current]
-    w.mode.setCurrentIndex(0);assert w.canvas.mode=='clothes';w.compare.setChecked(True);w.show_preview();w.grab().save(str(Path(__file__).resolve().parents[1]/'interface.png'))
+    w.mode.setCurrentIndex(6);assert w.canvas.mode=='clothes';w.compare.setChecked(True);w.show_preview();w.grab().save(str(Path(__file__).resolve().parents[1]/'interface.png'))
     w.states.clear();w.close()
-print('PASS: compact batch, persistent output, auto quality, four tabs, portrait presets, direct zoom/pan, clothes, removal, layers, export, session')
+print('PASS: local-only quality, step undo, staged circular brushes, clothes, removal, JPG export, session')
