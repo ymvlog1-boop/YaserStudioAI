@@ -38,7 +38,11 @@ with tempfile.TemporaryDirectory() as d:
     w.compare.setChecked(True);w.show_preview();assert w.canvas.pix.pixmap().width()==w.preview.shape[1]*2+8
     w.compare.setChecked(False)
     w.checkpoint();w.sliders[0].setValue(60);wait();assert w.states[w.current]['settings'][0]==60
-    w.undo();wait();assert w.sliders[0].value()==0
+    w.checkpoint();assert len(w.layers[w.current])>=2
+    layer_count=len(w.layers[w.current]);w.layer_list.setCurrentRow(w.layer_list.count()-1);w.restore_layer();wait();assert w.sliders[0].value()==0 and len(w.layers[w.current])>=layer_count
+    w.mode.setCurrentIndex(11);assert w.canvas.mode=='local_highlights' and w.canvas.cursor().shape()==Qt.CursorShape.BlankCursor
+    w.undo();wait();assert w.sliders[0].value()==60
+    w.layer_list.setCurrentRow(w.layer_list.count()-1);w.restore_layer();wait();assert w.sliders[0].value()==0
     w.sliders[3].setValue(40);w.apply_all();wait();assert all(s['settings'][3]==40 for s in w.states.values())
     item=w.face_list.item(0);item.setCheckState(Qt.CheckState.Unchecked);wait();assert not w.states[w.current]['faces'][0]['enabled'];w.undo();wait()
     w.mode.setCurrentIndex(1);center=w.canvas.mapFromScene(250,180)
@@ -53,7 +57,7 @@ with tempfile.TemporaryDirectory() as d:
     QFileDialog.getSaveFileName=lambda *a,**k:(str(p/'session.yaser.json'),'')
     w.save_session();assert (p/'session.yaser.json').exists()
     QFileDialog.getOpenFileName=lambda *a,**k:(str(p/'session.yaser.json'),'')
-    w.load_session();wait();assert len(w.states)==3
+    w.load_session();wait();assert len(w.states)==3 and w.layers[w.current]
     w.mode.setCurrentIndex(0);w.compare.setChecked(True);w.show_preview();w.grab().save(str(Path(__file__).resolve().parents[1]/'interface.png'))
     w.states.clear();w.close()
-print('PASS: native-ready import, thumbnails, drag/drop, before/after, detection, sliders, batch, face exclusion, brush, inpaint undo, export, session, RTL screenshot')
+print('PASS: native-ready import, thumbnails, drag/drop, before/after, layers, circular brush, highlight brush, detection, batch, inpaint undo, export, session, RTL screenshot')

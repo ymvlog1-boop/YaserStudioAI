@@ -22,12 +22,13 @@ class Job(QRunnable):
 class Canvas(QGraphicsView):
     stroke=Signal(object)
     def __init__(self):
-        super().__init__();self.setScene(QGraphicsScene(self));self.pix=None;self.faces=[];self.mode='view';self.brush=25;self.active=None;self.zoomed=False
+        super().__init__();self.setScene(QGraphicsScene(self));self.pix=None;self.faces=[];self.mode='view';self.brush=25;self.active=None;self.zoomed=False;self.cursor_item=None
         self.setRenderHint(QPainter.RenderHint.Antialiasing);self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.setMouseTracking(True);self.viewport().setMouseTracking(True)
         self.setBackgroundBrush(QColor('#10151f'));self.setMinimumSize(420,400)
     def show_image(self,rgb):
         h,w=rgb.shape[:2];im=QImage(rgb.data,w,h,rgb.strides[0],QImage.Format.Format_RGB888).copy()
-        self.scene().clear();self.pix=self.scene().addPixmap(QPixmap.fromImage(im));self.scene().setSceneRect(0,0,w,h)
+        self.scene().clear();self.cursor_item=None;self.pix=self.scene().addPixmap(QPixmap.fromImage(im));self.scene().setSceneRect(0,0,w,h)
         if not self.zoomed:self.fitInView(self.pix,Qt.AspectRatioMode.KeepAspectRatio)
     def draw_faces(self,faces):
         if not self.pix:return
@@ -38,7 +39,20 @@ class Canvas(QGraphicsView):
             t=self.scene().addText(str(i+1));t.setDefaultTextColor(color);t.setPos(x*w,y*h)
     def set_mode(self,mode):
         self.mode=mode;self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag if mode=='view' else QGraphicsView.DragMode.NoDrag)
-        self.setCursor(Qt.CursorShape.ArrowCursor if mode=='view' else Qt.CursorShape.CrossCursor)
+        self.setCursor(Qt.CursorShape.ArrowCursor if mode=='view' else Qt.CursorShape.BlankCursor)
+        if mode=='view' and self.cursor_item:self.cursor_item.setVisible(False)
+    def set_brush(self,value):self.brush=value
+    def update_brush_cursor(self,event):
+        if self.mode=='view' or not self.pix:return
+        p=self.mapToScene(event.position().toPoint());r=self.sceneRect()
+        if not r.contains(p):
+            if self.cursor_item:self.cursor_item.setVisible(False)
+            return
+        diameter=max(2,self.brush/1000*min(r.width(),r.height()))
+        if self.cursor_item is None:
+            pen=QPen(QColor(255,255,255,235),2);pen.setCosmetic(True)
+            self.cursor_item=self.scene().addEllipse(0,0,diameter,diameter,pen);self.cursor_item.setZValue(9999)
+        self.cursor_item.setRect(p.x()-diameter/2,p.y()-diameter/2,diameter,diameter);self.cursor_item.setVisible(True)
     def point(self,event):
         p=self.mapToScene(event.position().toPoint());r=self.sceneRect()
         if not r.contains(p):return None
@@ -57,6 +71,7 @@ class Canvas(QGraphicsView):
             if p:self.active={'points':[p],'size':self.brush/1000,'erase':self.mode=='erase'};self.paint_segment(p,p)
         else:super().mousePressEvent(e)
     def mouseMoveEvent(self,e):
+        self.update_brush_cursor(e)
         if self.active:
             p=self.point(e)
             if p:self.paint_segment(self.active['points'][-1],p);self.active['points'].append(p)
@@ -96,7 +111,7 @@ class Studio(QMainWindow):
     def __init__(self):
         super().__init__();self.setWindowTitle('Yaser Studio AI '+updater.VERSION+' — استوديو ياسر');self.resize(1440,930);self.setWindowIcon(QIcon(str(engine.ROOT/'assets/yaser.ico')))
         self.setAcceptDrops(True)
-        self.states={};self.history={};self.current=None;self.original=None;self.preview=None;self.pending=[];self.output='';self.loading=False
+        self.states={};self.history={};self.layers={};self.layer_serial={};self.current=None;self.original=None;self.preview=None;self.pending=[];self.output='';self.loading=False
         self.items_by_path={};self.thumbnail_queue=[];self.thumbnail_busy=False
         self.update_settings=QSettings('YaserStudioAI','Updates');
         if '--smoke-test' not in sys.argv and not os.environ.get('YASER_DISABLE_UPDATE_CHECK'):QTimer.singleShot(6000,lambda:self.check_online(True))
@@ -149,11 +164,18 @@ class Studio(QMainWindow):
         self.add_button(pl,'تطبيق كل الإعدادات على الدفعة',self.apply_all,True)
 
         region_tab=QWidget();tabs.addTab(region_tab,'٤ الرتوش');pl=QVBoxLayout(region_tab);self.section(pl,'الوجوه والمناطق')
+        self.section(pl,'طبقات التعديل')
+        self.layer_list=QListWidget();self.layer_list.setMaximumHeight(105);pl.addWidget(self.layer_list)
+        self.add_button(pl,'الرجوع إلى الطبقة المحددة',self.restore_layer)
+        layer_note=QLabel('كل تعديل يُحفظ كطبقة مستقلة. الرجوع إلى طبقة قديمة لا يمسح الطبقات الأحدث.');layer_note.setWordWrap(True);layer_note.setObjectName('muted');pl.addWidget(layer_note)
         self.face_list=QListWidget();self.face_list.setMaximumHeight(112);self.face_list.itemChanged.connect(self.face_changed);pl.addWidget(self.face_list)
         self.show_boxes=QCheckBox('إظهار إطارات الوجوه');self.show_boxes.setChecked(True);self.show_boxes.toggled.connect(self.show_preview);pl.addWidget(self.show_boxes)
         self.show_skin=QCheckBox('إظهار منطقة تنقية البشرة');self.show_skin.toggled.connect(self.show_preview);pl.addWidget(self.show_skin)
-        self.mode=QComboBox();self.mode.addItems(['عرض وتحريك','إضافة منطقة بشرة','استثناء منطقة بشرة','إزالة عيب أو عنصر','تفتيح بالفرشاة','تغميق بالفرشاة','تقوية لون بالفرشاة','تنعيم بالفرشاة','كي الملابس بالفرشاة','استرجاع من الخلفية','حذف من الخلفية']);self.mode.currentIndexChanged.connect(self.mode_changed);pl.addWidget(self.mode)
-        pl.addWidget(QLabel('حجم الفرشاة'));bs=QSlider(Qt.Orientation.Horizontal);bs.setRange(3,180);bs.setValue(25);bs.valueChanged.connect(lambda v:setattr(self.canvas,'brush',v));pl.addWidget(bs)
+        self.mode=QComboBox();self.mode.addItems(['عرض وتحريك','إضافة منطقة بشرة','استثناء منطقة بشرة','إزالة عيب أو عنصر','تفتيح بالفرشاة','تغميق بالفرشاة','تقوية لون بالفرشاة','تنعيم بالفرشاة','كي الملابس بالفرشاة','استرجاع من الخلفية','حذف من الخلفية','خفض الإضاءة العالية بالفرشاة']);self.mode.currentIndexChanged.connect(self.mode_changed);pl.addWidget(self.mode)
+        pl.addWidget(QLabel('حجم الفرشاة الدائرية'));bs=QSlider(Qt.Orientation.Horizontal);bs.setRange(3,180);bs.setValue(25);bs.valueChanged.connect(self.canvas.set_brush);pl.addWidget(bs)
+        self.section(pl,'أدوات الإضاءة تحت الفرشاة')
+        light_tools=QHBoxLayout();self.add_button(light_tools,'تفتيح',lambda:self.mode.setCurrentIndex(4));self.add_button(light_tools,'تغميق',lambda:self.mode.setCurrentIndex(5));pl.addLayout(light_tools)
+        self.add_button(pl,'خفض الإضاءة العالية بالفرشاة',lambda:self.mode.setCurrentIndex(11))
         self.add_button(pl,'إزالة العنصر المحدد',self.commit_removal)
         self.add_button(pl,'مسح تحديد الإزالة',self.clear_pending)
         self.clothes_iron=self.control_slider(pl,'قوة كي الملابس تلقائياً',0,100,0)
@@ -220,7 +242,7 @@ class Studio(QMainWindow):
         for path in self.paths_from_inputs(paths):
             path=str(Path(path).resolve())
             if path in self.states:continue
-            self.states[path]=engine.fresh_state();self.history[path]=[]
+            fresh=engine.fresh_state();self.states[path]=fresh;self.history[path]=[];self.layers[path]=[{'name':'الأصل','state':copy.deepcopy(fresh)}];self.layer_serial[path]=0
             item=QListWidgetItem(Path(path).name);item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter|Qt.AlignmentFlag.AlignTop)
             item.setData(Qt.ItemDataRole.UserRole,path);item.setToolTip(path);self.files.addItem(item);self.items_by_path[path]=item;added.append(path)
         self.count.setText(f'{len(self.states)} صورة')
@@ -251,7 +273,7 @@ class Studio(QMainWindow):
     def clear_files(self):
         if self.busy:return
         if self.states and QMessageBox.question(self,'إفراغ القائمة','إزالة الصور والتعديلات من هذه الجلسة؟ احفظ الجلسة أولاً إن أردت العودة إليها.')!=QMessageBox.StandardButton.Yes:return
-        self.revision+=1;self.current=None;self.files.clear();self.states.clear();self.history.clear();self.items_by_path.clear();self.thumbnail_queue.clear();self.pending=[];self.original=None;self.preview=None;self.canvas.scene().clear();self.canvas.pix=None;self.face_list.clear();self.count.setText('لا توجد صور')
+        self.revision+=1;self.current=None;self.files.clear();self.states.clear();self.history.clear();self.layers.clear();self.layer_serial.clear();self.items_by_path.clear();self.thumbnail_queue.clear();self.pending=[];self.original=None;self.preview=None;self.canvas.scene().clear();self.canvas.pix=None;self.face_list.clear();self.layer_list.clear();self.count.setText('لا توجد صور')
     def select_item(self,item,old):
         if not item:return
         self.current=item.data(Qt.ItemDataRole.UserRole);self.pending=[];self.original=None;self.preview=None;self.canvas.scene().clear();self.canvas.pix=None;self.canvas.zoomed=False;self.sync_controls();self.request_preview()
@@ -271,8 +293,30 @@ class Studio(QMainWindow):
             item=QListWidgetItem(f'الوجه {i+1}');item.setFlags(item.flags()|Qt.ItemFlag.ItemIsUserCheckable);item.setCheckState(Qt.CheckState.Checked if f['enabled'] else Qt.CheckState.Unchecked);self.face_list.addItem(item)
         if s['faces']==[]:self.face_list.addItem('لا وجوه مكتشفة — استخدم فرشاة البشرة')
         self.bg_label.setText(Path(s['background']).name if s['background'] else 'الخلفية الأصلية');self.loading=False
+        self.refresh_layers()
+    def refresh_layers(self):
+        if not hasattr(self,'layer_list'):return
+        self.layer_list.clear()
+        if not self.current:return
+        self.layer_list.addItem('الحالة الحالية')
+        for layer in reversed(self.layers.get(self.current,[])):self.layer_list.addItem(layer['name'])
+        self.layer_list.setCurrentRow(0)
+    def record_layer(self,label='تعديل'):
+        if not self.current:return
+        stack=self.layers.setdefault(self.current,[]);state=copy.deepcopy(self.states[self.current])
+        if stack and stack[-1]['state']==state:return
+        self.layer_serial[self.current]=self.layer_serial.get(self.current,0)+1
+        stack.append({'name':f'{label} {self.layer_serial[self.current]}','state':state});del stack[:-40]
+        self.refresh_layers()
+    def restore_layer(self):
+        if not self.current or self.layer_list.currentRow()<=0:return
+        stack=self.layers.get(self.current,[]);index=len(stack)-self.layer_list.currentRow()
+        if not 0<=index<len(stack):return
+        self.record_layer('قبل الرجوع');self.history[self.current].append(copy.deepcopy(self.states[self.current]));self.history[self.current]=self.history[self.current][-30:]
+        self.states[self.current]=copy.deepcopy(stack[index]['state']);self.sync_controls();self.schedule();self.status.setText(f'تم الرجوع إلى «{stack[index]["name"]}» وبقيت الطبقات الأحدث محفوظة')
     def checkpoint(self,*args):
         if self.current and not self.loading:
+            self.record_layer('تعديل')
             hist=self.history[self.current];hist.append(copy.deepcopy(self.states[self.current]));del hist[:-30]
     def settings_changed(self,*args):
         if self.loading or not self.current:return
@@ -312,7 +356,7 @@ class Studio(QMainWindow):
         if row>=len(faces):return
         self.checkpoint();faces[row]['enabled']=item.checkState()==Qt.CheckState.Checked;self.schedule()
     def mode_changed(self,i):
-        self.canvas.set_mode(['view','skin','erase','remove','local_brighten','local_darken','local_saturate','local_smooth','clothes','bg_add','bg_erase'][i])
+        self.canvas.set_mode(['view','skin','erase','remove','local_brighten','local_darken','local_saturate','local_smooth','clothes','bg_add','bg_erase','local_highlights'][i])
         if i>0 and self.compare.isChecked():self.compare.setChecked(False)
     def on_stroke(self,s):
         if not self.current:return
@@ -432,7 +476,7 @@ class Studio(QMainWindow):
         if not self.states:return
         p,_=QFileDialog.getSaveFileName(self,'حفظ جلسة التعديلات','','جلسة ياسر (*.yaser.json)')
         if p:
-            try:Path(p).write_text(json.dumps({'version':2,'states':self.states,'output':self.output},ensure_ascii=False),encoding='utf-8');self.status.setText('حُفظت الجلسة؛ أبقِ ملفات الصور والخلفيات في مواقعها')
+            try:Path(p).write_text(json.dumps({'version':3,'states':self.states,'layers':self.layers,'layer_serial':self.layer_serial,'output':self.output},ensure_ascii=False),encoding='utf-8');self.status.setText('حُفظت الجلسة مع جميع طبقات التعديل؛ أبقِ ملفات الصور والخلفيات في مواقعها')
             except Exception as e:QMessageBox.warning(self,'تعذر حفظ الجلسة',str(e))
     def load_session(self,preset=None):
         if self.busy:return
@@ -440,15 +484,18 @@ class Studio(QMainWindow):
         if not p:return
         try:
             data=json.loads(Path(p).read_text(encoding='utf-8'));states=data['states']
-            if data.get('version') not in (1,2) or not isinstance(states,dict):raise ValueError('صيغة جلسة غير مدعومة')
+            if data.get('version') not in (1,2,3) or not isinstance(states,dict):raise ValueError('صيغة جلسة غير مدعومة')
             for path,state in states.items():
                 if len(state['settings'])!=4 or any(not isinstance(v,int) or not 0<=v<=100 for v in state['settings']):raise ValueError('مستويات غير صالحة')
                 for key in ('strokes','removals'):assert isinstance(state[key],list)
                 states[path]=engine.normalize_state(state)
             if self.states and QMessageBox.question(self,'فتح جلسة','استبدال الجلسة الحالية؟ تأكد من حفظها أولاً.')!=QMessageBox.StandardButton.Yes:return
-            self.revision+=1;self.current=None;self.files.clear();self.states={};self.history={};self.items_by_path.clear();self.thumbnail_queue.clear()
+            self.revision+=1;self.current=None;self.files.clear();self.states={};self.history={};self.layers={};self.layer_serial={};self.items_by_path.clear();self.thumbnail_queue.clear()
             existing={k:v for k,v in states.items() if Path(k).is_file()};self.add_paths(existing)
-            self.states.update(existing);self.output=data.get('output','');self.output_label.setText(self.output or 'لم يُحدد مجلد الحفظ');self.sync_controls();self.request_preview()
+            self.states.update(existing)
+            if data.get('version')==3:
+                self.layers.update({k:v for k,v in data.get('layers',{}).items() if k in existing});self.layer_serial.update({k:int(v) for k,v in data.get('layer_serial',{}).items() if k in existing})
+            self.output=data.get('output','');self.output_label.setText(self.output or 'لم يُحدد مجلد الحفظ');self.sync_controls();self.request_preview()
             if len(existing)!=len(states):QMessageBox.information(self,'صور غير موجودة',f'تعذر العثور على {len(states)-len(existing)} صورة في موقعها السابق.')
         except Exception as e:QMessageBox.warning(self,'تعذر فتح الجلسة',str(e))
     def configure_updates(self):

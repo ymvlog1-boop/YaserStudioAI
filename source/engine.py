@@ -109,6 +109,10 @@ def apply_local_adjustments(rgb,strokes):
         mask=stroke_mask(rgb.shape,[dict(s,erase=False)]).astype(np.float32)/255;mask=cv2.GaussianBlur(mask,(0,0),max(1,s.get('size',.02)*min(rgb.shape[:2])*.18));amount=s.get('amount',35)/100;kind=s.get('kind','brighten')
         if kind=='brighten':target=np.clip(out*(1+amount*.8)+amount*12,0,255)
         elif kind=='darken':target=np.clip(out*(1-amount*.65),0,255)
+        elif kind=='highlights':
+            lum=cv2.cvtColor(np.clip(out,0,255).astype(np.uint8),cv2.COLOR_RGB2GRAY).astype(np.float32)/255
+            weight=np.clip((lum-.48)/.42,0,1)[...,None]
+            target=np.clip(out*(1-weight*amount*.72),0,255)
         elif kind=='saturate':
             hsv=cv2.cvtColor(np.clip(out,0,255).astype(np.uint8),cv2.COLOR_RGB2HSV).astype(np.float32);hsv[...,1]=np.clip(hsv[...,1]*(1+amount),0,255);target=cv2.cvtColor(hsv.astype(np.uint8),cv2.COLOR_HSV2RGB).astype(np.float32)
         else:target=cv2.GaussianBlur(out,(0,0),2.5)

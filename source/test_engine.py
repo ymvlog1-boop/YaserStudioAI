@@ -68,6 +68,8 @@ class ProcessingTests(unittest.TestCase):
         corrected=engine.process(self.rgb,s);self.assertEqual(corrected.shape,self.rgb.shape);self.assertGreater(float(corrected.mean()),float(self.rgb.mean()))
         local=engine.fresh_state();local['local_strokes']=[{'points':[[.5,.5]],'size':.25,'erase':False,'kind':'darken','amount':80}]
         out=engine.process(self.rgb,local);self.assertLess(float(out[240:280,240:280].mean()),float(self.rgb[240:280,240:280].mean()));self.assertTrue(np.array_equal(out[:30,:30],self.rgb[:30,:30]))
+        highlights=engine.fresh_state();highlights['local_strokes']=[{'points':[[.5,.5]],'size':.3,'erase':False,'kind':'highlights','amount':90}]
+        reduced=engine.process(self.rgb,highlights);self.assertLess(float(reduced[230:285,230:285].mean()),float(self.rgb[230:285,230:285].mean()));self.assertTrue(np.array_equal(reduced[:30,:30],self.rgb[:30,:30]))
         s=engine.fresh_state();s['enhance']['upscale']=2;large=engine.process(self.rgb,s,final=True);self.assertEqual(large.shape[:2],(self.rgb.shape[0]*2,self.rgb.shape[1]*2))
     def test_presets_state_and_manual_background_refine(self):
         old={'faces':[],'strokes':[],'removals':[],'settings':[1,2,3,4],'background':None};s=engine.normalize_state(old)
