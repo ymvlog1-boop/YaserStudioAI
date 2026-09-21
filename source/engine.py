@@ -26,13 +26,13 @@ def detect_faces(rgb):
     return result
 
 def fresh_state():
-    return {'faces':None,'strokes':[],'removals':[],'settings':[0,0,0,0],'enhance':dict(ENHANCE_DEFAULTS),'quality_preset':'يدوي','tone':dict(TONE_DEFAULTS),'portrait':dict(PORTRAIT_DEFAULTS),'local_strokes':[],'background':None,'background_options':dict(BACKGROUND_DEFAULTS),'background_strokes':[],'portrait_blur':0,'clothes_iron':0,'clothes_strokes':[],'preset':'يدوي','style_preset':'بدون قالب شامل','ai_result':None}
+    return {'faces':None,'strokes':[],'removals':[],'settings':[0,0,0,0],'enhance':dict(ENHANCE_DEFAULTS),'quality_preset':'يدوي','tone':dict(TONE_DEFAULTS),'portrait':dict(PORTRAIT_DEFAULTS),'local_strokes':[],'background':None,'background_options':dict(BACKGROUND_DEFAULTS),'background_strokes':[],'portrait_blur':0,'clothes_iron':0,'clothes_strokes':[],'preset':'يدوي','style_preset':'بدون قالب شامل'}
 
 def normalize_state(state):
     base=fresh_state()
     for key,value in (state or {}).items():
         if key in ('enhance','tone','portrait','background_options') and isinstance(value,dict):base[key].update(value)
-        else:base[key]=value
+        elif key in base:base[key]=value
     return base
 
 def stroke_mask(shape,strokes):
@@ -106,8 +106,11 @@ def adjust_tone(rgb,v):
 def apply_local_adjustments(rgb,strokes):
     out=rgb.astype(np.float32)
     for s in strokes or []:
-        mask=stroke_mask(rgb.shape,[dict(s,erase=False)]).astype(np.float32)/255;mask=cv2.GaussianBlur(mask,(0,0),max(1,s.get('size',.02)*min(rgb.shape[:2])*.18));amount=s.get('amount',35)/100;kind=s.get('kind','brighten')
+        mask=stroke_mask(rgb.shape,[dict(s,erase=False)]).astype(np.float32)/255;kind=s.get('kind','brighten');feather=.34 if kind=='relight' else .18;mask=cv2.GaussianBlur(mask,(0,0),max(1,s.get('size',.02)*min(rgb.shape[:2])*feather));amount=s.get('amount',35)/100
         if kind=='brighten':target=np.clip(out*(1+amount*.8)+amount*12,0,255)
+        elif kind=='relight':
+            lum=cv2.cvtColor(np.clip(out,0,255).astype(np.uint8),cv2.COLOR_RGB2GRAY).astype(np.float32)/255
+            lift=(1-lum[...,None]*.72)*amount*.58;target=np.clip(out+(255-out)*lift,0,255)
         elif kind=='darken':target=np.clip(out*(1-amount*.65),0,255)
         elif kind=='highlights':
             lum=cv2.cvtColor(np.clip(out,0,255).astype(np.uint8),cv2.COLOR_RGB2GRAY).astype(np.float32)/255
@@ -115,6 +118,8 @@ def apply_local_adjustments(rgb,strokes):
             target=np.clip(out*(1-weight*amount*.72),0,255)
         elif kind=='saturate':
             hsv=cv2.cvtColor(np.clip(out,0,255).astype(np.uint8),cv2.COLOR_RGB2HSV).astype(np.float32);hsv[...,1]=np.clip(hsv[...,1]*(1+amount),0,255);target=cv2.cvtColor(hsv.astype(np.uint8),cv2.COLOR_HSV2RGB).astype(np.float32)
+        elif kind=='smooth':
+            source=np.clip(out,0,255).astype(np.uint8);fine=cv2.bilateralFilter(source,11,28+amount*34,7+amount*7).astype(np.float32);soft=cv2.GaussianBlur(fine,(0,0),1.2+amount*2.8);target=fine*(1-amount*.45)+soft*(amount*.45)
         else:target=cv2.GaussianBlur(out,(0,0),2.5)
         out=out*(1-mask[...,None])+target*mask[...,None]
     return np.clip(out,0,255).astype(np.uint8)
@@ -146,7 +151,10 @@ def remove_objects(rgb,removals):
     result=rgb.copy()
     for strokes in removals:
         mask=stroke_mask(result.shape,strokes)
-        if np.any(mask):result=cv2.inpaint(result,mask,max(3,round(min(result.shape[:2])*.006)),cv2.INPAINT_TELEA)
+        if np.any(mask):
+            diameter=max(3,round(min(result.shape[:2])*.004));kernel=cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(diameter*2+1,diameter*2+1));mask=cv2.dilate(mask,kernel)
+            radius=max(4,min(18,round(min(result.shape[:2])*.009)));telea=cv2.inpaint(result,mask,radius,cv2.INPAINT_TELEA);navier=cv2.inpaint(result,mask,radius,cv2.INPAINT_NS)
+            result=cv2.addWeighted(telea,.7,navier,.3,0)
     return result
 
 def person_alpha(rgb,options=None,strokes=None):
@@ -192,26 +200,20 @@ def blur_original_background(rgb,amount,options=None,strokes=None):
 def iron_clothes(rgb,state):
     amount=int(state.get('clothes_iron',0) or 0);strokes=state.get('clothes_strokes') or []
     if amount<=0 and not strokes:return rgb.copy()
-    h,w=rgb.shape[:2];manual=stroke_mask(rgb.shape,strokes).astype(np.float32)/255 if strokes else np.zeros((h,w),np.float32)
+    h,w=rgb.shape[:2];manual=stroke_mask(rgb.shape,strokes).astype(np.float32)/255 if strokes else np.zeros((h,w),np.float32);manual_amount=max([int(s.get('amount',70)) for s in strokes] or [0])
     if amount>0:
         person=person_alpha(rgb)>0.58;ycc=cv2.cvtColor(rgb,cv2.COLOR_RGB2YCrCb);skin=cv2.inRange(ycc,np.array([12,122,62]),np.array([255,190,150]))>0
         auto=(person&~skin).astype(np.float32);auto[face_region_mask(rgb,state)>.05]=0;mask=np.maximum(auto,manual)
-    else:mask=manual;amount=65
-    mask=cv2.GaussianBlur(mask,(0,0),max(1,min(h,w)/700));lab=cv2.cvtColor(rgb,cv2.COLOR_RGB2LAB);light=lab[...,0].astype(np.float32)
-    sigma_color=14+amount*.16;sigma_space=8+amount*.13;smooth=cv2.bilateralFilter(light,-1,sigma_color,sigma_space);broad=cv2.GaussianBlur(light,(0,0),2.2+amount*.035);target=smooth*.72+broad*.28
+    else:mask=manual
+    amount=max(amount,manual_amount);mask=cv2.GaussianBlur(mask,(0,0),max(1,min(h,w)/600));lab=cv2.cvtColor(rgb,cv2.COLOR_RGB2LAB);light=lab[...,0].astype(np.float32)
+    sigma_color=20+amount*.25;sigma_space=12+amount*.18;smooth=cv2.bilateralFilter(light,-1,sigma_color,sigma_space);broad=cv2.GaussianBlur(light,(0,0),3.0+amount*.06);target=smooth*.55+broad*.45
     gx=cv2.Sobel(light,cv2.CV_32F,1,0,ksize=3);gy=cv2.Sobel(light,cv2.CV_32F,0,1,ksize=3);edge=np.clip((cv2.magnitude(gx,gy)-10)/42,0,1)
-    mix=np.clip(mask*(amount/100)*.88*(1-edge),0,.9);lab[...,0]=np.clip(light*(1-mix)+target*mix,0,255).astype(np.uint8)
+    mix=np.clip(mask*(.3+amount/100*.8)*(1-edge*.82),0,.96);lab[...,0]=np.clip(light*(1-mix)+target*mix,0,255).astype(np.uint8)
     return cv2.cvtColor(lab,cv2.COLOR_LAB2RGB)
 
 def process(rgb,state,final=False):
-    state=normalize_state(state);base=rgb
-    ai_path=state.get('ai_result')
-    if ai_path and Path(ai_path).is_file():
-        try:
-            ai,_=read_image(ai_path);ai=cv2.resize(ai,(rgb.shape[1],rgb.shape[0]),interpolation=cv2.INTER_LANCZOS4) if ai.shape[:2]!=rgb.shape[:2] else ai
-            mask=face_region_mask(rgb,state)[...,None]*.68;base=np.clip(rgb.astype(np.float32)*(1-mask)+ai.astype(np.float32)*mask,0,255).astype(np.uint8) if np.any(mask) else rgb
-        except Exception:base=rgb
-    out=remove_objects(base,state['removals']);out=enhance_image(out,state);out=adjust_tone(out,state['tone']);out=apply_local_adjustments(out,state['local_strokes']);out=iron_clothes(out,state);out=retouch(out,state)
+    state=normalize_state(state)
+    out=remove_objects(rgb,state['removals']);out=enhance_image(out,state);out=adjust_tone(out,state['tone']);out=apply_local_adjustments(out,state['local_strokes']);out=iron_clothes(out,state);out=retouch(out,state)
     if state.get('background'):out=replace_background(out,state['background'],state['background_options'],state['background_strokes'])
     elif state.get('portrait_blur',0):out=blur_original_background(out,state['portrait_blur'],state['background_options'],state['background_strokes'])
     scale=int(state['enhance'].get('upscale',1)) if final else 1
