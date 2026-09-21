@@ -5,9 +5,9 @@ from PySide6.QtCore import Qt, Signal, QObject, QRunnable, QThreadPool, QTimer, 
 from PySide6.QtGui import QImage,QPixmap,QPen,QColor,QPainter,QKeySequence,QShortcut,QFontDatabase,QFont,QIcon,QImageReader
 from PySide6.QtWidgets import (QApplication,QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,
  QListWidget,QListWidgetItem,QSlider,QFileDialog,QMessageBox,QGraphicsView,QGraphicsScene,QComboBox,
- QCheckBox,QProgressBar,QScrollArea,QFrame,QSplitter,QTabWidget,QInputDialog,QListView,QAbstractItemView)
+ QCheckBox,QProgressBar,QScrollArea,QFrame,QSplitter,QTabWidget,QInputDialog,QListView,QAbstractItemView,QLineEdit)
 import engine
-import updater, subprocess, os
+import updater, online_ai, subprocess, os
 
 SUPPORTED_IMAGES={'.jpg','.jpeg','.png','.webp','.bmp','.tif','.tiff'}
 
@@ -22,8 +22,8 @@ class Job(QRunnable):
 class Canvas(QGraphicsView):
     stroke=Signal(object)
     def __init__(self):
-        super().__init__();self.setScene(QGraphicsScene(self));self.pix=None;self.faces=[];self.mode='view';self.brush=25;self.active=None;self.zoomed=False;self.cursor_item=None
-        self.setRenderHint(QPainter.RenderHint.Antialiasing);self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        super().__init__();self.setScene(QGraphicsScene(self));self.pix=None;self.faces=[];self.mode='clothes';self.brush=25;self.active=None;self.zoomed=False;self.cursor_item=None;self.pan_active=False;self.pan_pos=None
+        self.setRenderHint(QPainter.RenderHint.Antialiasing);self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setMouseTracking(True);self.viewport().setMouseTracking(True)
         self.setBackgroundBrush(QColor('#10151f'));self.setMinimumSize(420,400)
     def show_image(self,rgb):
@@ -38,12 +38,10 @@ class Canvas(QGraphicsView):
             self.scene().addRect(x*w,y*h,fw*w,fh*h,pen)
             t=self.scene().addText(str(i+1));t.setDefaultTextColor(color);t.setPos(x*w,y*h)
     def set_mode(self,mode):
-        self.mode=mode;self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag if mode=='view' else QGraphicsView.DragMode.NoDrag)
-        self.setCursor(Qt.CursorShape.ArrowCursor if mode=='view' else Qt.CursorShape.BlankCursor)
-        if mode=='view' and self.cursor_item:self.cursor_item.setVisible(False)
+        self.mode=mode;self.setDragMode(QGraphicsView.DragMode.NoDrag);self.setCursor(Qt.CursorShape.BlankCursor)
     def set_brush(self,value):self.brush=value
     def update_brush_cursor(self,event):
-        if self.mode=='view' or not self.pix:return
+        if not self.pix:return
         p=self.mapToScene(event.position().toPoint());r=self.sceneRect()
         if not r.contains(p):
             if self.cursor_item:self.cursor_item.setVisible(False)
@@ -66,17 +64,23 @@ class Canvas(QGraphicsView):
         pen=QPen(color,max(1,self.brush/1000*min(r.width(),r.height())));pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         self.scene().addLine(a[0]*r.width(),a[1]*r.height(),b[0]*r.width()+.01,b[1]*r.height()+.01,pen)
     def mousePressEvent(self,e):
-        if self.mode!='view' and self.pix and e.button()==Qt.MouseButton.LeftButton:
+        if e.button() in (Qt.MouseButton.MiddleButton,Qt.MouseButton.RightButton):
+            self.pan_active=True;self.pan_pos=e.position();self.setCursor(Qt.CursorShape.ClosedHandCursor);e.accept();return
+        if self.pix and e.button()==Qt.MouseButton.LeftButton:
             p=self.point(e)
             if p:self.active={'points':[p],'size':self.brush/1000,'erase':self.mode=='erase'};self.paint_segment(p,p)
         else:super().mousePressEvent(e)
     def mouseMoveEvent(self,e):
+        if self.pan_active:
+            delta=e.position()-self.pan_pos;self.pan_pos=e.position();self.horizontalScrollBar().setValue(self.horizontalScrollBar().value()-round(delta.x()));self.verticalScrollBar().setValue(self.verticalScrollBar().value()-round(delta.y()));e.accept();return
         self.update_brush_cursor(e)
         if self.active:
             p=self.point(e)
             if p:self.paint_segment(self.active['points'][-1],p);self.active['points'].append(p)
         else:super().mouseMoveEvent(e)
     def mouseReleaseEvent(self,e):
+        if self.pan_active and e.button() in (Qt.MouseButton.MiddleButton,Qt.MouseButton.RightButton):
+            self.pan_active=False;self.pan_pos=None;self.setCursor(Qt.CursorShape.BlankCursor);e.accept();return
         if self.active:
             s=self.active;self.active=None;self.stroke.emit(s)
         else:super().mouseReleaseEvent(e)
@@ -111,15 +115,16 @@ class Studio(QMainWindow):
     def __init__(self):
         super().__init__();self.setWindowTitle('Yaser Studio AI '+updater.VERSION+' — استوديو ياسر');self.resize(1440,930);self.setWindowIcon(QIcon(str(engine.ROOT/'assets/yaser.ico')))
         self.setAcceptDrops(True)
-        self.states={};self.history={};self.layers={};self.layer_serial={};self.current=None;self.original=None;self.preview=None;self.pending=[];self.output='';self.loading=False
+        self.states={};self.history={};self.layers={};self.layer_serial={};self.current=None;self.original=None;self.preview=None;self.pending=[];self.loading=False
         self.items_by_path={};self.thumbnail_queue=[];self.thumbnail_busy=False
+        self.app_settings=QSettings('YaserStudioAI','Studio');self.output=str(self.app_settings.value('output_folder','') or '');self.hf_token=''
         self.update_settings=QSettings('YaserStudioAI','Updates');
         if '--smoke-test' not in sys.argv and not os.environ.get('YASER_DISABLE_UPDATE_CHECK'):QTimer.singleShot(6000,lambda:self.check_online(True))
         self.pool=QThreadPool();self.pool.setMaxThreadCount(1);self.jobs=set();self.revision=0;self.busy=False;self.cancel=threading.Event()
         self.timer=QTimer();self.timer.setSingleShot(True);self.timer.setInterval(400);self.timer.timeout.connect(self.request_preview)
         central=QWidget();self.setCentralWidget(central);root=QVBoxLayout(central);root.setContentsMargins(22,18,22,16)
         header=QHBoxLayout();brand=QLabel('Yaser Studio AI');brand.setObjectName('brand');header.addWidget(brand)
-        sub=QLabel('استوديو الصور  /  معالجة محلية على جهازك');sub.setObjectName('muted');header.addWidget(sub);header.addStretch();self.add_button(header,'تحديث من ملف',self.install_update);self.add_button(header,'تحديثات الإنترنت',self.configure_updates);root.addLayout(header)
+        sub=QLabel('استوديو الصور  /  معالجة محلية وAI اختياري');sub.setObjectName('muted');header.addWidget(sub);header.addStretch();self.add_button(header,'تحديث من ملف',self.install_update);self.add_button(header,'تحديثات الإنترنت',self.configure_updates);root.addLayout(header)
         toolbar=QHBoxLayout();root.addLayout(toolbar)
         self.add_button(toolbar,'استيراد صور',self.import_files,True)
         self.add_button(toolbar,'استيراد مجلد',self.import_folder)
@@ -127,79 +132,69 @@ class Studio(QMainWindow):
         toolbar.addStretch();self.add_button(toolbar,'تراجع',self.undo);self.add_button(toolbar,'ملاءمة الصورة',lambda:self.canvas.fit())
         self.compare=self.add_button(toolbar,'عرض صورة واحدة',lambda:None);self.compare.setCheckable(True);self.compare.setChecked(True);self.compare.toggled.connect(self.show_preview)
         split=QSplitter();root.addWidget(split,1)
-        left=QWidget();ll=QHBoxLayout(left);left.setMinimumHeight(125);left.setMaximumHeight(150)
+        left=QWidget();ll=QHBoxLayout(left);ll.setContentsMargins(4,2,4,2);left.setMinimumHeight(72);left.setMaximumHeight(86)
         gallery_info=QWidget();gallery_labels=QVBoxLayout(gallery_info);gallery_labels.setContentsMargins(0,4,4,4)
         label=QLabel('صور الدفعة');label.setObjectName('section');gallery_labels.addWidget(label)
         self.files=QListWidget();self.files.setAcceptDrops(False);self.files.setViewMode(QListView.ViewMode.IconMode);self.files.setMovement(QListView.Movement.Static)
         self.files.setFlow(QListView.Flow.LeftToRight);self.files.setResizeMode(QListView.ResizeMode.Adjust);self.files.setWrapping(False);self.files.setWordWrap(True)
-        self.files.setIconSize(QSize(108,76));self.files.setGridSize(QSize(122,112));self.files.setSpacing(3)
+        self.files.setIconSize(QSize(64,46));self.files.setGridSize(QSize(78,66));self.files.setSpacing(2)
         self.files.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection);self.files.currentItemChanged.connect(self.select_item);ll.addWidget(self.files)
         self.count=QLabel('لا توجد صور');self.count.setObjectName('muted');gallery_labels.addWidget(self.count)
-        drop_tip=QLabel('اسحب الصور أو المجلدات هنا');drop_tip.setWordWrap(True);drop_tip.setObjectName('muted');gallery_labels.addWidget(drop_tip)
-        self.add_button(gallery_labels,'إفراغ القائمة',self.clear_files);ll.addWidget(gallery_info)
+        self.add_button(gallery_labels,'إفراغ',self.clear_files);ll.addWidget(gallery_info)
         mid=QWidget();ml=QVBoxLayout(mid);self.canvas=Canvas();self.canvas.setAcceptDrops(False);self.canvas.stroke.connect(self.on_stroke);ml.addWidget(self.canvas,1)
         self.image_info=QLabel('ابدأ باستيراد صورة أو مجلد صور');self.image_info.setAlignment(Qt.AlignmentFlag.AlignCenter);ml.addWidget(self.image_info)
-        tip=QLabel('عجلة الماوس للتكبير • السحب للتحريك في أداة العرض • المعاينة مخفّضة والحفظ بالدقة الأصلية');tip.setObjectName('muted');tip.setWordWrap(True);ml.addWidget(tip);split.addWidget(mid)
+        tip=QLabel('عجلة الماوس للتقريب والإبعاد مباشرة • اسحب بزر الماوس الأيمن أو الأوسط للتحريك • الحفظ بالدقة الأصلية');tip.setObjectName('muted');tip.setWordWrap(True);ml.addWidget(tip);split.addWidget(mid)
         panel=QWidget();panel.setMinimumWidth(255);panel.setMaximumWidth(305);outer=QVBoxLayout(panel);tabs=QTabWidget();tabs.setTabPosition(QTabWidget.TabPosition.North);tabs.setUsesScrollButtons(True);outer.addWidget(tabs)
         quality_tab=QWidget();tabs.addTab(quality_tab,'١ الجودة');pl=QVBoxLayout(quality_tab);self.section(pl,'تحسين جودة الصورة')
+        pl.addWidget(QLabel('التحسين التلقائي'));self.quality_preset=QComboBox();self.quality_preset.addItems(['يدوي','تلقائي خفيف','تلقائي طبيعي','تلقائي قوي','تفاصيل عالية']);self.quality_preset.currentIndexChanged.connect(self.quality_preset_changed);pl.addWidget(self.quality_preset)
         self.enhance_sliders={}
         for key,name in [('denoise','إزالة التشويش'),('sharpen','استرجاع الحدة')]:self.enhance_sliders[key]=self.control_slider(pl,name,0,100)
-        row=QHBoxLayout();row.addWidget(QLabel('رفع الدقة عند الحفظ'));self.upscale=QComboBox();self.upscale.addItems(['الحجم الأصلي','تكبير ×2','تكبير ×4']);self.upscale.currentIndexChanged.connect(self.settings_changed);row.addWidget(self.upscale);pl.addLayout(row)
-        note=QLabel('الحفظ ×2 أو ×4 يستخدم تكبير محلي محافظ ويحافظ على بنية الصورة.');note.setObjectName('muted');note.setWordWrap(True);pl.addWidget(note);pl.addStretch()
+        self.section(pl,'تحسين AI عبر الإنترنت')
+        self.add_button(pl,'تحسين الوجه بالذكاء الاصطناعي',self.enhance_online,True)
+        self.add_button(pl,'إعداد مفتاح Hugging Face المجاني',self.configure_ai)
+        self.add_button(pl,'إلغاء نتيجة تحسين الإنترنت',self.clear_online_ai)
+        note=QLabel('اختياري: يرفع الصورة الحالية إلى خدمة GFPGAN العامة في Hugging Face بعد موافقتك. الحساب المجاني يمنح حصة محدودة وقد يكون هناك انتظار.');note.setObjectName('muted');note.setWordWrap(True);pl.addWidget(note);pl.addStretch()
 
         color_tab=QWidget();tabs.addTab(color_tab,'٢ الضوء');pl=QVBoxLayout(color_tab);self.section(pl,'الإضاءة والألوان')
         self.tone_sliders={}
         tone_names=[('exposure','التعريض'),('contrast','التباين'),('highlights','الإضاءة القوية'),('shadows','الظلال'),('whites','الأبيض'),('blacks','الأسود'),('temperature','حرارة اللون'),('tint','صبغة اللون'),('vibrance','حيوية الألوان'),('saturation','التشبّع'),('clarity','الوضوح'),('dehaze','إزالة الضباب')]
         for key,name in tone_names:self.tone_sliders[key]=self.control_slider(pl,name,-100,100)
-        self.section(pl,'تعديل موضعي بالفرشاة');self.local_kind=QComboBox();self.local_kind.addItems(['تفتيح','تغميق','تقوية اللون','تنعيم موضعي']);pl.addWidget(self.local_kind);self.local_amount=self.control_slider(pl,'قوة الفرشاة',1,100,35)
+        pl.addStretch()
 
         skin_tab=QWidget();tabs.addTab(skin_tab,'٣ البورتريه');pl=QVBoxLayout(skin_tab);self.section(pl,'قوالب تنقية سريعة')
-        self.style_preset=QComboBox();self.style_preset.addItems(['بدون قالب شامل','طبيعي متوازن','بورتريه هادئ','استوديو رسمي','تخرج دافئ','سينمائي ناعم']);pl.addWidget(self.style_preset)
+        self.style_preset=QComboBox();self.style_preset.addItems(['بدون قالب شامل','طبيعي متوازن','بورتريه هادئ','استوديو رسمي','تخرج دافئ','سينمائي ناعم','بشرة مشرقة','ألوان ملكية','ألوان باردة نظيفة']);pl.addWidget(self.style_preset)
         self.add_button(pl,'تطبيق القالب الشامل الآن',self.apply_auto_style,True)
-        self.preset=QComboBox();self.preset.addItems(['يدوي','طبيعي خفيف','استوديو متوازن','زفاف ناعم','تنظيف قوي','الحفاظ على النمش']);self.preset.currentIndexChanged.connect(self.preset_changed);pl.addWidget(self.preset)
+        self.preset=QComboBox();self.preset.addItems(['يدوي','تنقية بسيطة جداً','تنقية بسيطة','طبيعي خفيف','استوديو متوازن','زفاف ناعم','تنقية قوية','تنقية قوية جداً','الحفاظ على النمش','بشرة دافئة','بشرة باردة']);self.preset.currentIndexChanged.connect(self.preset_changed);pl.addWidget(self.preset)
         self.sliders=[]
         for name in ['الحبوب','التجاعيد','النمش / الشوائب','تنعيم البشرة']:self.sliders.append(self.control_slider(pl,name,0,100))
         self.portrait_sliders={}
         for key,name in [('skin_light','تفتيح البشرة والرقبة'),('skin_tone','دفء لون البشرة'),('shine','إزالة اللمعان'),('under_eyes','الهالات تحت العين'),('eyes','تفتيح العيون'),('teeth','تبييض الأسنان'),('face_detail','استرجاع تفاصيل الوجه')]:self.portrait_sliders[key]=self.control_slider(pl,name,0,100)
+        self.section(pl,'الوجوه المكتشفة');self.face_list=QListWidget();self.face_list.setMaximumHeight(82);self.face_list.itemChanged.connect(self.face_changed);pl.addWidget(self.face_list)
+        self.show_boxes=QCheckBox('إظهار إطارات الوجوه');self.show_boxes.setChecked(False);self.show_boxes.toggled.connect(self.show_preview);pl.addWidget(self.show_boxes);self.show_skin=QCheckBox();self.show_skin.setChecked(False)
         self.add_button(pl,'تطبيق كل الإعدادات على الدفعة',self.apply_all,True)
 
-        region_tab=QWidget();tabs.addTab(region_tab,'٤ الرتوش');pl=QVBoxLayout(region_tab);self.section(pl,'الوجوه والمناطق')
+        region_tab=QWidget();tabs.addTab(region_tab,'٤ الكي والإزالة');pl=QVBoxLayout(region_tab);self.section(pl,'كي الملابس')
+        self.clothes_iron=self.control_slider(pl,'قوة الكي التلقائي',0,100,0)
+        self.add_button(pl,'تفعيل فرشاة كي الملابس',lambda:self.mode.setCurrentIndex(0),True)
+        clothes_note=QLabel('مرّر الفرشاة على منطقة الملابس؛ تُنعّم التجاعيد فوراً مع الحفاظ على لون القماش.');clothes_note.setWordWrap(True);clothes_note.setObjectName('muted');pl.addWidget(clothes_note)
+        self.section(pl,'الفرشاة الدائرية الشفافة')
+        self.mode=QComboBox();self.mode.addItems(['كي الملابس بالفرشاة','إزالة عنصر من الخلفية','تفتيح المنطقة','تغميق المنطقة','تلوين المنطقة','خفض الإضاءة العالية']);self.mode.currentIndexChanged.connect(self.mode_changed);pl.addWidget(self.mode)
+        pl.addWidget(QLabel('حجم الفرشاة'));bs=QSlider(Qt.Orientation.Horizontal);bs.setRange(3,180);bs.setValue(25);bs.valueChanged.connect(self.canvas.set_brush);pl.addWidget(bs)
+        self.local_amount=self.control_slider(pl,'قوة التأثير',1,100,35)
+        self.add_button(pl,'تنفيذ إزالة العنصر المحدد',self.commit_removal,True)
+        self.add_button(pl,'مسح التحديد الأحمر',self.clear_pending)
         self.section(pl,'طبقات التعديل')
-        self.layer_list=QListWidget();self.layer_list.setMaximumHeight(105);pl.addWidget(self.layer_list)
+        self.layer_list=QListWidget();self.layer_list.setMaximumHeight(92);pl.addWidget(self.layer_list)
         self.add_button(pl,'الرجوع إلى الطبقة المحددة',self.restore_layer)
         layer_note=QLabel('كل تعديل يُحفظ كطبقة مستقلة. الرجوع إلى طبقة قديمة لا يمسح الطبقات الأحدث.');layer_note.setWordWrap(True);layer_note.setObjectName('muted');pl.addWidget(layer_note)
-        self.face_list=QListWidget();self.face_list.setMaximumHeight(112);self.face_list.itemChanged.connect(self.face_changed);pl.addWidget(self.face_list)
-        self.show_boxes=QCheckBox('إظهار إطارات الوجوه');self.show_boxes.setChecked(True);self.show_boxes.toggled.connect(self.show_preview);pl.addWidget(self.show_boxes)
-        self.show_skin=QCheckBox('إظهار منطقة تنقية البشرة');self.show_skin.toggled.connect(self.show_preview);pl.addWidget(self.show_skin)
-        self.mode=QComboBox();self.mode.addItems(['عرض وتحريك','إضافة منطقة بشرة','استثناء منطقة بشرة','إزالة عيب أو عنصر','تفتيح بالفرشاة','تغميق بالفرشاة','تقوية لون بالفرشاة','تنعيم بالفرشاة','كي الملابس بالفرشاة','استرجاع من الخلفية','حذف من الخلفية','خفض الإضاءة العالية بالفرشاة']);self.mode.currentIndexChanged.connect(self.mode_changed);pl.addWidget(self.mode)
-        pl.addWidget(QLabel('حجم الفرشاة الدائرية'));bs=QSlider(Qt.Orientation.Horizontal);bs.setRange(3,180);bs.setValue(25);bs.valueChanged.connect(self.canvas.set_brush);pl.addWidget(bs)
-        self.section(pl,'أدوات الإضاءة تحت الفرشاة')
-        light_tools=QHBoxLayout();self.add_button(light_tools,'تفتيح',lambda:self.mode.setCurrentIndex(4));self.add_button(light_tools,'تغميق',lambda:self.mode.setCurrentIndex(5));pl.addLayout(light_tools)
-        self.add_button(pl,'خفض الإضاءة العالية بالفرشاة',lambda:self.mode.setCurrentIndex(11))
-        self.add_button(pl,'إزالة العنصر المحدد',self.commit_removal)
-        self.add_button(pl,'مسح تحديد الإزالة',self.clear_pending)
-        self.clothes_iron=self.control_slider(pl,'قوة كي الملابس تلقائياً',0,100,0)
-        clothes_note=QLabel('يعدّل إضاءة التجاعيد ويحافظ على لون القماش. استخدم فرشاة كي الملابس للمناطق الصعبة.');clothes_note.setWordWrap(True);clothes_note.setObjectName('muted');pl.addWidget(clothes_note)
-        pl.addStretch();bg_tab=QWidget();tabs.addTab(bg_tab,'٥ الخلفية');pl=QVBoxLayout(bg_tab);self.section(pl,'قص احترافي وتغيير الخلفية')
-        self.add_button(pl,'اختيار خلفية من الكمبيوتر',self.choose_background)
-        self.bg_label=QLabel('الخلفية الأصلية');self.bg_label.setWordWrap(True);self.bg_label.setObjectName('muted');pl.addWidget(self.bg_label)
-        self.add_button(pl,'تطبيق الخلفية على الدفعة',self.background_all)
-        self.add_button(pl,'استعادة الخلفية الأصلية',self.clear_background)
-        self.background_sliders={}
-        self.background_sliders['edge']=self.control_slider(pl,'إزاحة الحافة',-10,10,-2)
-        self.background_sliders['feather']=self.control_slider(pl,'نعومة الحافة',0,20,2)
-        self.background_sliders['decontaminate']=self.control_slider(pl,'تنظيف لون الخلفية القديمة',0,100,65)
-        self.background_sliders['blur']=self.control_slider(pl,'ضبابية الخلفية الجديدة',0,100,0)
-        self.portrait_blur=self.control_slider(pl,'ضبابية الخلفية الأصلية للبورتريه',0,100,0)
-        note=QLabel('استخدم «استرجاع من الخلفية» للشعر أو الأطراف الناقصة، و«حذف من الخلفية» لبقايا الخلفية القديمة.');note.setWordWrap(True);note.setObjectName('muted');pl.addWidget(note)
-        pl.addStretch();scroll=QScrollArea();scroll.setMinimumWidth(270);scroll.setMaximumWidth(320);scroll.setWidgetResizable(True);scroll.setWidget(panel);split.addWidget(scroll);split.setSizes([1090,285]);root.addWidget(left)
+        self.background_sliders={};pl.addStretch();scroll=QScrollArea();scroll.setMinimumWidth(270);scroll.setMaximumWidth(320);scroll.setWidgetResizable(True);scroll.setWidget(panel);split.addWidget(scroll);split.setSizes([1090,285]);root.addWidget(left)
         foot=QHBoxLayout();root.addLayout(foot);self.add_button(foot,'اختيار مجلد الإخراج',self.choose_output)
-        self.output_label=QLabel('لم يُحدد مجلد الحفظ');self.output_label.setObjectName('muted');foot.addWidget(self.output_label,1)
+        self.output_label=QLabel(self.output or 'لم يُحدد مجلد الحفظ');self.output_label.setObjectName('muted');foot.addWidget(self.output_label,1)
         self.fmt=QComboBox();self.fmt.addItems(['JPG — جودة 98','PNG — بدون فقد']);foot.addWidget(self.fmt)
         self.add_button(foot,'حفظ الصورة الحالية',lambda:self.export(False));self.add_button(foot,'حفظ الدفعة كاملة',lambda:self.export(True),True)
         self.stop=self.add_button(foot,'إيقاف',self.cancel.set);self.stop.setEnabled(False)
         self.progress=QProgressBar();self.progress.setRange(0,100);self.progress.setValue(0);root.addWidget(self.progress)
-        self.status=QLabel('جاهز • الصور الأصلية لا تُعدّل • لا تُرسل الصور إلى الإنترنت');root.addWidget(self.status)
+        self.status=QLabel('جاهز • الصور الأصلية لا تُعدّل • الرفع للإنترنت لا يحدث إلا بأمر منك');root.addWidget(self.status)
         QShortcut(QKeySequence('Ctrl+Z'),self,activated=self.undo)
     def add_button(self,layout,title,fn,primary=False):
         b=QPushButton(title);b.clicked.connect(fn)
@@ -282,17 +277,16 @@ class Studio(QMainWindow):
         self.loading=True;s=engine.normalize_state(self.states[self.current]);self.states[self.current]=s
         for slider,value in zip(self.sliders,s['settings']):slider.setValue(value)
         for key,slider in self.enhance_sliders.items():slider.setValue(s['enhance'][key])
-        self.upscale.setCurrentIndex({1:0,2:1,4:2}.get(s['enhance'].get('upscale',1),0))
+        self.quality_preset.setCurrentText(s.get('quality_preset','يدوي'))
         for key,slider in self.tone_sliders.items():slider.setValue(s['tone'][key])
         for key,slider in self.portrait_sliders.items():slider.setValue(s['portrait'][key])
-        for key,slider in self.background_sliders.items():slider.setValue(s['background_options'][key])
-        self.portrait_blur.setValue(s.get('portrait_blur',0));self.clothes_iron.setValue(s.get('clothes_iron',0));self.style_preset.setCurrentText(s.get('style_preset','بدون قالب شامل'))
+        self.clothes_iron.setValue(s.get('clothes_iron',0));self.style_preset.setCurrentText(s.get('style_preset','بدون قالب شامل'))
         self.preset.setCurrentText(s.get('preset','يدوي'))
         self.face_list.clear()
         for i,f in enumerate(s['faces'] or []):
             item=QListWidgetItem(f'الوجه {i+1}');item.setFlags(item.flags()|Qt.ItemFlag.ItemIsUserCheckable);item.setCheckState(Qt.CheckState.Checked if f['enabled'] else Qt.CheckState.Unchecked);self.face_list.addItem(item)
         if s['faces']==[]:self.face_list.addItem('لا وجوه مكتشفة — استخدم فرشاة البشرة')
-        self.bg_label.setText(Path(s['background']).name if s['background'] else 'الخلفية الأصلية');self.loading=False
+        self.loading=False
         self.refresh_layers()
     def refresh_layers(self):
         if not hasattr(self,'layer_list'):return
@@ -321,27 +315,41 @@ class Studio(QMainWindow):
     def settings_changed(self,*args):
         if self.loading or not self.current:return
         state=self.states[self.current];state['settings']=[s.value() for s in self.sliders]
-        state['enhance']={key:slider.value() for key,slider in self.enhance_sliders.items()};state['enhance']['upscale']=[1,2,4][self.upscale.currentIndex()]
-        state['tone']={key:slider.value() for key,slider in self.tone_sliders.items()};state['portrait']={key:slider.value() for key,slider in self.portrait_sliders.items()};state['background_options']={key:slider.value() for key,slider in self.background_sliders.items()};state['portrait_blur']=self.portrait_blur.value();state['clothes_iron']=self.clothes_iron.value();self.schedule()
+        state['enhance'].update({key:slider.value() for key,slider in self.enhance_sliders.items()});state['enhance']['upscale']=1
+        state['tone']={key:slider.value() for key,slider in self.tone_sliders.items()};state['portrait']={key:slider.value() for key,slider in self.portrait_sliders.items()};state['clothes_iron']=self.clothes_iron.value();self.schedule()
+    def quality_preset_changed(self,*args):
+        if self.loading or not self.current:return
+        presets={'تلقائي خفيف':(10,12,14),'تلقائي طبيعي':(22,20,28),'تلقائي قوي':(38,32,42),'تفاصيل عالية':(16,48,62)}
+        name=self.quality_preset.currentText();self.states[self.current]['quality_preset']=name
+        if name in presets:
+            self.checkpoint();denoise,sharpen,detail=presets[name];self.loading=True;self.enhance_sliders['denoise'].setValue(denoise);self.enhance_sliders['sharpen'].setValue(sharpen);self.portrait_sliders['face_detail'].setValue(detail);self.loading=False;self.settings_changed();self.status.setText(f'تم تطبيق «{name}» على الصورة الحالية')
     def apply_auto_style(self):
         if self.loading or not self.current:return
         name=self.style_preset.currentText()
         styles={
-          'طبيعي متوازن':{'settings':[32,18,12,28],'enhance':{'denoise':16,'sharpen':14},'portrait':{'skin_light':7,'skin_tone':3,'shine':24,'under_eyes':18,'eyes':12,'teeth':8,'face_detail':24},'tone':{'exposure':2,'contrast':6,'highlights':-10,'shadows':12,'temperature':4,'vibrance':10,'saturation':2,'clarity':4},'blur':22},
-          'بورتريه هادئ':{'settings':[46,32,24,46],'enhance':{'denoise':22,'sharpen':12},'portrait':{'skin_light':12,'skin_tone':5,'shine':38,'under_eyes':30,'eyes':16,'teeth':12,'face_detail':20},'tone':{'exposure':5,'contrast':3,'highlights':-18,'shadows':18,'temperature':5,'vibrance':9,'saturation':-3,'clarity':-2},'blur':55},
-          'استوديو رسمي':{'settings':[38,25,16,32],'enhance':{'denoise':18,'sharpen':30},'portrait':{'skin_light':8,'skin_tone':2,'shine':32,'under_eyes':24,'eyes':18,'teeth':12,'face_detail':46},'tone':{'exposure':2,'contrast':11,'highlights':-12,'shadows':10,'temperature':1,'vibrance':8,'saturation':0,'clarity':12},'blur':34},
-          'تخرج دافئ':{'settings':[42,28,20,40],'enhance':{'denoise':20,'sharpen':24},'portrait':{'skin_light':10,'skin_tone':7,'shine':36,'under_eyes':28,'eyes':20,'teeth':16,'face_detail':36},'tone':{'exposure':4,'contrast':8,'highlights':-20,'shadows':16,'temperature':11,'vibrance':18,'saturation':3,'clarity':7},'blur':44},
-          'سينمائي ناعم':{'settings':[38,26,18,38],'enhance':{'denoise':20,'sharpen':18},'portrait':{'skin_light':7,'skin_tone':4,'shine':30,'under_eyes':24,'eyes':14,'teeth':10,'face_detail':30},'tone':{'exposure':0,'contrast':16,'highlights':-26,'shadows':10,'blacks':-8,'temperature':6,'tint':3,'vibrance':8,'saturation':-5,'clarity':4},'blur':60}}
+          'طبيعي متوازن':{'settings':[28,14,10,24],'enhance':{'denoise':14,'sharpen':16},'portrait':{'skin_light':6,'skin_tone':3,'shine':20,'under_eyes':14,'eyes':10,'teeth':7,'face_detail':26},'tone':{'exposure':2,'contrast':5,'highlights':-8,'shadows':10,'temperature':3,'vibrance':8,'saturation':1,'clarity':4},'blur':0},
+          'بورتريه هادئ':{'settings':[40,25,18,38],'enhance':{'denoise':20,'sharpen':16},'portrait':{'skin_light':10,'skin_tone':4,'shine':32,'under_eyes':24,'eyes':14,'teeth':10,'face_detail':28},'tone':{'exposure':4,'contrast':3,'highlights':-14,'shadows':14,'temperature':4,'vibrance':8,'saturation':-2,'clarity':0},'blur':18},
+          'استوديو رسمي':{'settings':[34,20,12,28],'enhance':{'denoise':16,'sharpen':30},'portrait':{'skin_light':7,'skin_tone':2,'shine':28,'under_eyes':20,'eyes':16,'teeth':10,'face_detail':44},'tone':{'exposure':2,'contrast':10,'highlights':-10,'shadows':9,'temperature':1,'vibrance':7,'saturation':0,'clarity':10},'blur':8},
+          'تخرج دافئ':{'settings':[38,24,16,34],'enhance':{'denoise':18,'sharpen':26},'portrait':{'skin_light':9,'skin_tone':7,'shine':32,'under_eyes':24,'eyes':18,'teeth':14,'face_detail':38},'tone':{'exposure':4,'contrast':7,'highlights':-16,'shadows':14,'temperature':10,'vibrance':16,'saturation':3,'clarity':7},'blur':12},
+          'سينمائي ناعم':{'settings':[34,22,14,32],'enhance':{'denoise':18,'sharpen':20},'portrait':{'skin_light':6,'skin_tone':4,'shine':26,'under_eyes':20,'eyes':12,'teeth':8,'face_detail':32},'tone':{'exposure':0,'contrast':14,'highlights':-22,'shadows':9,'blacks':-7,'temperature':5,'tint':3,'vibrance':7,'saturation':-5,'clarity':4},'blur':20},
+          'بشرة مشرقة':{'settings':[44,24,18,40],'enhance':{'denoise':20,'sharpen':22},'portrait':{'skin_light':18,'skin_tone':5,'shine':38,'under_eyes':28,'eyes':18,'teeth':16,'face_detail':34},'tone':{'exposure':5,'contrast':4,'highlights':-15,'shadows':16,'temperature':5,'vibrance':12,'saturation':1},'blur':8},
+          'ألوان ملكية':{'settings':[36,22,14,30],'enhance':{'denoise':16,'sharpen':28},'portrait':{'skin_light':8,'skin_tone':4,'shine':30,'under_eyes':22,'eyes':16,'teeth':12,'face_detail':40},'tone':{'exposure':1,'contrast':15,'highlights':-18,'shadows':8,'blacks':-9,'temperature':7,'vibrance':20,'saturation':4,'clarity':10},'blur':10},
+          'ألوان باردة نظيفة':{'settings':[32,18,12,28],'enhance':{'denoise':18,'sharpen':25},'portrait':{'skin_light':9,'skin_tone':0,'shine':28,'under_eyes':20,'eyes':18,'teeth':14,'face_detail':38},'tone':{'exposure':3,'contrast':8,'highlights':-14,'shadows':12,'temperature':-8,'tint':1,'vibrance':10,'saturation':-2,'clarity':8},'blur':6}}
         if name not in styles:return
         self.checkpoint();cfg=styles[name];state=self.states[self.current];state['style_preset']=name;state['settings']=cfg['settings'][:];state['enhance'].update(cfg['enhance']);state['portrait'].update(cfg['portrait']);state['tone'].update(cfg['tone']);state['portrait_blur']=cfg['blur'];self.sync_controls();self.schedule();self.status.setText(f'تم تطبيق قالب «{name}» على الصورة الحالية — استخدم تطبيق الإعدادات على الدفعة لتعميمه')
     def preset_changed(self,*args):
         if self.loading or not self.current:return
         presets={
+          'تنقية بسيطة جداً':([12,8,6,12],{'skin_light':3,'skin_tone':1,'shine':10,'under_eyes':8,'eyes':4,'teeth':3,'face_detail':15}),
+          'تنقية بسيطة':([20,12,10,18],{'skin_light':5,'skin_tone':2,'shine':16,'under_eyes':12,'eyes':7,'teeth':5,'face_detail':20}),
           'طبيعي خفيف':([25,15,15,22],{'skin_light':8,'skin_tone':4,'shine':20,'under_eyes':15,'eyes':10,'teeth':8}),
           'استوديو متوازن':([45,32,28,42],{'skin_light':12,'skin_tone':6,'shine':40,'under_eyes':30,'eyes':22,'teeth':18}),
           'زفاف ناعم':([52,38,35,55],{'skin_light':18,'skin_tone':8,'shine':48,'under_eyes':35,'eyes':28,'teeth':30}),
-          'تنظيف قوي':([78,62,60,68],{'skin_light':15,'skin_tone':5,'shine':65,'under_eyes':52,'eyes':25,'teeth':25}),
-          'الحفاظ على النمش':([38,22,0,32],{'skin_light':8,'skin_tone':5,'shine':30,'under_eyes':22,'eyes':15,'teeth':12})}
+          'تنقية قوية':([66,48,44,58],{'skin_light':14,'skin_tone':5,'shine':56,'under_eyes':44,'eyes':24,'teeth':22,'face_detail':28}),
+          'تنقية قوية جداً':([82,66,62,72],{'skin_light':16,'skin_tone':5,'shine':68,'under_eyes':56,'eyes':28,'teeth':26,'face_detail':24}),
+          'الحفاظ على النمش':([38,22,0,32],{'skin_light':8,'skin_tone':5,'shine':30,'under_eyes':22,'eyes':15,'teeth':12}),
+          'بشرة دافئة':([36,22,16,34],{'skin_light':10,'skin_tone':12,'shine':32,'under_eyes':24,'eyes':16,'teeth':12,'face_detail':30}),
+          'بشرة باردة':([34,20,14,30],{'skin_light':11,'skin_tone':0,'shine':30,'under_eyes':22,'eyes':18,'teeth':14,'face_detail':32})}
         name=self.preset.currentText();self.states[self.current]['preset']=name
         if name in presets:
             self.checkpoint();values,portrait=presets[name];self.loading=True
@@ -356,8 +364,8 @@ class Studio(QMainWindow):
         if row>=len(faces):return
         self.checkpoint();faces[row]['enabled']=item.checkState()==Qt.CheckState.Checked;self.schedule()
     def mode_changed(self,i):
-        self.canvas.set_mode(['view','skin','erase','remove','local_brighten','local_darken','local_saturate','local_smooth','clothes','bg_add','bg_erase','local_highlights'][i])
-        if i>0 and self.compare.isChecked():self.compare.setChecked(False)
+        self.canvas.set_mode(['clothes','remove','local_brighten','local_darken','local_saturate','local_highlights'][i])
+        if self.compare.isChecked():self.compare.setChecked(False)
     def on_stroke(self,s):
         if not self.current:return
         if self.canvas.mode=='remove':self.pending.append(s);self.status.setText('تحديد إزالة جاهز — اضغط «إزالة العنصر المحدد»')
@@ -372,6 +380,25 @@ class Studio(QMainWindow):
         if not self.current or not self.pending:return
         self.checkpoint();self.states[self.current]['removals'].append(copy.deepcopy(self.pending));self.pending=[];self.schedule()
     def clear_pending(self):self.pending=[];self.show_preview()
+    def enhance_online(self):
+        if not self.current or self.busy:return
+        answer=QMessageBox.question(self,'تحسين AI عبر الإنترنت','سيتم رفع الصورة الحالية إلى مساحة GFPGAN عامة على Hugging Face لمعالجتها ثم تنزيل النتيجة. الخدمة خارجية ولها حصة مجانية محدودة. هل تسمح برفع هذه الصورة الآن؟')
+        if answer!=QMessageBox.StandardButton.Yes:return
+        path=self.current;self.busy=True;self.status.setText('جارٍ رفع الصورة وتحسينها بالذكاء الاصطناعي…')
+        token=self.hf_token
+        def work(signals):return online_ai.enhance(path,token)
+        def done(result):
+            self.busy=False
+            if path not in self.states:return
+            self.current=path;self.checkpoint();self.states[path]['ai_result']=result;self.schedule();self.status.setText('اكتمل تحسين AI للصورة الحالية؛ النتيجة محفوظة كطبقة ويمكن التراجع عنها')
+        self.run_job(work,done)
+    def configure_ai(self):
+        token,ok=QInputDialog.getText(self,'مفتاح Hugging Face','الصق مفتاح Read من حساب Hugging Face المجاني. يبقى المفتاح في الذاكرة حتى تغلق البرنامج ولا يُحفظ على القرص.',QLineEdit.EchoMode.Password)
+        if ok:
+            self.hf_token=token.strip();self.status.setText('تم إعداد خدمة AI لهذه الجلسة' if self.hf_token else 'سيُستخدم الوصول العام بدون حساب')
+    def clear_online_ai(self):
+        if self.current and self.states[self.current].get('ai_result'):
+            self.checkpoint();self.states[self.current]['ai_result']=None;self.schedule();self.status.setText('أُلغيت نتيجة تحسين الإنترنت وعادت المعالجة إلى الصورة الأصلية')
     def undo(self):
         if not self.current:return
         if self.pending:self.pending.pop();self.show_preview();return
@@ -381,7 +408,7 @@ class Studio(QMainWindow):
         source=self.states[self.current]
         for p,s in self.states.items():
             self.history[p].append(copy.deepcopy(s));self.history[p]=self.history[p][-30:]
-            for key in ('settings','enhance','tone','portrait','background_options','portrait_blur','clothes_iron','preset','style_preset'):s[key]=copy.deepcopy(source[key])
+            for key in ('settings','enhance','quality_preset','tone','portrait','background_options','portrait_blur','clothes_iron','preset','style_preset'):s[key]=copy.deepcopy(source[key])
         self.status.setText(f'تم تطبيق الجودة والإضاءة والألوان والتنقية على {len(self.states)} صورة؛ الفرشاة واختيار الوجوه يبقيان خاصين بكل صورة.');self.schedule()
     def choose_background(self):
         if not self.current:return
@@ -436,8 +463,10 @@ class Studio(QMainWindow):
             for a,b in zip(pts,pts[1:] or pts):self.canvas.paint_segment(a,b)
             self.canvas.brush=old
     def choose_output(self):
-        p=QFileDialog.getExistingDirectory(self,'مجلد إخراج واحد للدفعة')
-        if p:self.output=p;self.output_label.setText(p)
+        start=self.output if self.output and Path(self.output).is_dir() else ''
+        p=QFileDialog.getExistingDirectory(self,'مجلد إخراج واحد للدفعة',start)
+        if p:
+            self.output=p;self.output_label.setText(p);self.app_settings.setValue('output_folder',p);self.app_settings.sync()
     def export(self,all_images):
         if self.busy or not self.current:return
         if self.pending:
@@ -495,7 +524,9 @@ class Studio(QMainWindow):
             self.states.update(existing)
             if data.get('version')==3:
                 self.layers.update({k:v for k,v in data.get('layers',{}).items() if k in existing});self.layer_serial.update({k:int(v) for k,v in data.get('layer_serial',{}).items() if k in existing})
-            self.output=data.get('output','');self.output_label.setText(self.output or 'لم يُحدد مجلد الحفظ');self.sync_controls();self.request_preview()
+            self.output=data.get('output',self.output) or self.output;self.output_label.setText(self.output or 'لم يُحدد مجلد الحفظ');
+            if self.output:self.app_settings.setValue('output_folder',self.output)
+            self.sync_controls();self.request_preview()
             if len(existing)!=len(states):QMessageBox.information(self,'صور غير موجودة',f'تعذر العثور على {len(states)-len(existing)} صورة في موقعها السابق.')
         except Exception as e:QMessageBox.warning(self,'تعذر فتح الجلسة',str(e))
     def configure_updates(self):
