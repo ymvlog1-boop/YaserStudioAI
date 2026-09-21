@@ -1,4 +1,4 @@
-#define AppVersion "0.5.0"
+#define AppVersion "0.5.1"
 [Setup]
 AppId={{A7064431-96F7-4DB7-A268-6AD46B58B761}
 AppName=Yaser Studio AI
